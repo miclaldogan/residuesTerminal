@@ -457,8 +457,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let n = menu.option_count();
                                 let mut activate = false;
                                 match key.code {
-                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => menu.up(),
-                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => menu.down(),
+                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => { menu.up(); audio.menu_nav(); }
+                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => { menu.down(); audio.menu_nav(); }
                                     // Bound-checked against the active list length so an
                                     // out-of-range digit is simply ignored — never a panic.
                                     KeyCode::Char(c @ '1'..='9') => {
@@ -472,7 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => {}
                                 }
                                 if activate {
-                                    audio.menu_click();
+                                    audio.menu_confirm();
                                     match menu.selected_action() {
                                         // Open the act picker (cursor on the latest act).
                                         MenuAction::SelectAct => menu.open_act_select(),
@@ -509,8 +509,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let n = menu.unlocked_count();
                                 let mut play = false;
                                 match key.code {
-                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => menu.act_up(),
-                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => menu.act_down(),
+                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => { menu.act_up(); audio.menu_nav(); }
+                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => { menu.act_down(); audio.menu_nav(); }
                                     KeyCode::Char(c @ '1'..='9') => {
                                         let idx = c as usize - '1' as usize;
                                         if idx < n {
@@ -522,7 +522,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => {}
                                 }
                                 if play {
-                                    audio.menu_click();
+                                    audio.menu_confirm();
                                     // Re-enter the chosen act's desk. The high-water mark is
                                     // preserved (= the saved furthest act), so replaying an
                                     // earlier act never regresses the saved progress.
@@ -597,9 +597,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 match state.current_act {
                                     Act::Jacquard1804 =>
-                                        handle_jacquard_input(key, &mut jacquard_puzzle, &mut state),
+                                        handle_jacquard_input(key, &mut jacquard_puzzle, &mut state, &mut audio),
                                     Act::Babbage1837 =>
-                                        handle_babbage_input(key, &mut babbage_puzzle, &mut state, &mut dialogue),
+                                        handle_babbage_input(key, &mut babbage_puzzle, &mut state, &mut dialogue, &mut audio),
                                     Act::Lovelace1843 => lovelace::handle_input(key, &mut lovelace_puzzle, &mut state, &mut dialogue, &mut audio),
                                     Act::Boole1854 => boole::handle_input(key, &mut boole_puzzle, &mut state, &mut dialogue, &mut audio),
                                     Act::Shannon1937 => shannon::handle_input(key, &mut shannon_puzzle, &mut state, &mut dialogue, &mut audio),

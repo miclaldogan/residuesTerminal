@@ -582,21 +582,25 @@ pub fn handle_input(
             if puzzle.cursor_row > 0 {
                 puzzle.cursor_row -= 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
             if puzzle.cursor_row + 1 < puzzle.logic_grid.len() {
                 puzzle.cursor_row += 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => {
             if puzzle.cursor_col > 0 {
                 puzzle.cursor_col -= 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => {
             if puzzle.cursor_col + 1 < GRID_W {
                 puzzle.cursor_col += 1;
             }
+            audio.grid_nav();
         }
         // Streamlined gate selection: Space steps the cursor cell around the circular
         // gate queue. Deterministic (no tremor), so the puzzle is always solvable.
@@ -604,7 +608,7 @@ pub fn handle_input(
             let (r, c) = (puzzle.cursor_row, puzzle.cursor_col);
             if r < puzzle.logic_grid.len() && c < GRID_W {
                 puzzle.logic_grid[r][c] = puzzle.logic_grid[r][c].cycle();
-                audio.daktilo_fast(); // crisp mechanical click on every cycle
+                audio.menu_confirm(); // heavy mechanical latch on each gate cycle
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -612,6 +616,20 @@ pub fn handle_input(
             if !verify(puzzle, state, dialogue) {
                 audio.glitch();
             }
+        }
+        // Hidden developer shortcut (demo-recording safeguard): F10 loads the known-good
+        // gate solution into every lane and runs the standard verification, cleanly
+        // driving the successful transition into the Act Outro. Not surfaced in the
+        // on-screen controls — the seed solution matches the derived TGT checksum.
+        KeyCode::F(10) => {
+            const SOLUTION: [Gate; GRID_H] = [Gate::Xor, Gate::And, Gate::Or, Gate::Xor];
+            for (r, row) in puzzle.logic_grid.iter_mut().enumerate() {
+                let g = SOLUTION[r % SOLUTION.len()];
+                for cell in row.iter_mut() {
+                    *cell = g;
+                }
+            }
+            let _ = verify(puzzle, state, dialogue);
         }
         KeyCode::Char(c) => {
             if let Some(intended) = Gate::from_key(c) {

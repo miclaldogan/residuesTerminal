@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::state::{Act, GlobalStateContext, ScreenState};
 use super::mind_log::{DialogueEngine, Speaker, VoiceCue};
+use super::audio::AudioEngine;
 use super::layout;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -538,7 +539,24 @@ pub fn render_workspace(
 
 /// Process a low-level keyboard event against the Jacquard puzzle state.
 /// Arrow keys navigate, Space/Enter toggle bits, A/D add/delete cards, R runs weave.
-pub fn handle_jacquard_input(key: KeyEvent, puzzle: &mut JacquardPuzzle, state: &mut GlobalStateContext) {
+/// True iff the player's drawn deck, looped, reproduces the repeating 4-row target
+/// damask for a full simulation — i.e. the *shape* itself is mathematically correct,
+/// independent of any downstream physical (roll/chain) limit. This is the FIRST gate the
+/// run check consults, so a wrong design is reported as a pattern error, never masked by
+/// a mechanical tear/jam.
+fn pattern_matches(puzzle: &JacquardPuzzle) -> bool {
+    if puzzle.cards.is_empty() {
+        return false;
+    }
+    (0..SIMULATION_ROWS).all(|row| puzzle.cards[row % puzzle.cards.len()] == puzzle.target[row % 4])
+}
+
+pub fn handle_jacquard_input(
+    key: KeyEvent,
+    puzzle: &mut JacquardPuzzle,
+    state: &mut GlobalStateContext,
+    audio: &mut AudioEngine,
+) {
     // ── Error state acknowledgment → phase transition ──
     if puzzle.snapped {
         puzzle.reset_for_phase(JacquardPhase::FalconChain);
@@ -579,32 +597,38 @@ pub fn handle_jacquard_input(key: KeyEvent, puzzle: &mut JacquardPuzzle, state: 
                 if puzzle.cursor_row > 0 {
                     puzzle.cursor_row -= 1;
                 }
+                audio.grid_nav();
             }
             KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
                 if puzzle.cursor_row + 1 < puzzle.cards.len() {
                     puzzle.cursor_row += 1;
                 }
+                audio.grid_nav();
             }
             KeyCode::Left => {
                 if puzzle.cursor_col > 0 {
                     puzzle.cursor_col -= 1;
                 }
+                audio.grid_nav();
             }
             KeyCode::Right => {
                 if puzzle.cursor_col < 7 {
                     puzzle.cursor_col += 1;
                 }
+                audio.grid_nav();
             }
 
-            // ── Bit toggle (XOR) ──
+            // ── Bit toggle (XOR) — punch/unpunch a hole (a structural decision). ──
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if puzzle.cursor_row < puzzle.cards.len() && puzzle.cursor_col < 8 {
                     puzzle.cards[puzzle.cursor_row][puzzle.cursor_col] ^= 1;
+                    audio.menu_confirm();
                 }
             }
 
             // ── Append blank card row ──
             KeyCode::Char('a') | KeyCode::Char('A') => {
+                audio.loom_shuttle(); // heavy carriage slide as a layer is fed
                 match puzzle.phase {
                     JacquardPhase::BouchonRoll => {
                         puzzle.cards.push([0u8; 8]);
@@ -647,6 +671,7 @@ pub fn handle_jacquard_input(key: KeyEvent, puzzle: &mut JacquardPuzzle, state: 
 
             // ── Delete selected card row ──
             KeyCode::Char('d') | KeyCode::Char('D') => {
+                audio.loom_shuttle();
                 if puzzle.cards.len() > 1 {
                     let idx = puzzle.cursor_row.min(puzzle.cards.len() - 1);
                     puzzle.cards.remove(idx);
@@ -668,6 +693,21 @@ pub fn handle_jacquard_input(key: KeyEvent, puzzle: &mut JacquardPuzzle, state: 
                     puzzle.push_log("No cards to weave.".into(), LogKind::Error);
                     return;
                 }
+                // ── ORDER OF OPERATIONS ──
+                // 1. Validate the drawn damask SHAPE against the target first. A wrong
+                //    design is a pattern error, reported as such — never masked by a
+                //    downstream mechanical paper-roll/carriage fault.
+                if !pattern_matches(puzzle) {
+                    puzzle.push_log(
+                        "[ERR_PATTERN_MISMATCH]: Target weave profile not met.".into(),
+                        LogKind::Error,
+                    );
+                    audio.glitch();
+                    return;
+                }
+                // 2. The shape is correct — only NOW exercise the physical roll/chain
+                //    capacity limits via the weave simulation.
+                audio.loom_shuttle();
                 puzzle.weaving = true;
                 puzzle.weave_row = 0;
                 puzzle.weave_tick_acc = 0;
@@ -833,5 +873,46 @@ pub fn tick_jacquard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pattern_order_tests {
+    use super::*;
+
+    #[test]
+    fn correct_designs_pass_the_pattern_gate() {
+        let mut p = JacquardPuzzle::new();
+        // The optimal period-2 deck reproduces the 0xAA/0x55 target.
+        p.cards = vec![
+            [1, 0, 1, 0, 1, 0, 1, 0], // 0xAA
+            [0, 1, 0, 1, 0, 1, 0, 1], // 0x55
+        ];
+        assert!(pattern_matches(&p), "the 2-card period solution must validate");
+
+        // A full 4-card repeat is equally valid.
+        p.cards = vec![
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1, 0, 1],
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1, 0, 1],
+        ];
+        assert!(pattern_matches(&p));
+    }
+
+    #[test]
+    fn wrong_design_fails_the_pattern_gate_first() {
+        let mut p = JacquardPuzzle::new();
+        // A single blank card cannot reproduce the alternating target → mismatch, so the
+        // run short-circuits to ERR_PATTERN_MISMATCH before any physical roll check.
+        p.cards = vec![[0u8; 8]];
+        assert!(!pattern_matches(&p));
+
+        // One wrong bit anywhere also fails the shape check.
+        p.cards = vec![
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1, 0, 0], // last bit wrong
+        ];
+        assert!(!pattern_matches(&p));
     }
 }

@@ -121,24 +121,24 @@ pub fn outro(act_id: u8) -> Scene {
             title: "\u{2014} THE LOOM REMEMBERS \u{2014}",
             image_rel: "jacquard_outro.png",
             lines: &[
-                "The riots faded; the cards endured. Within a generation, Jacquard's looms clothed half of Europe.",
-                "He died honoured \u{2014} yet never grasped that his holes in card had taught mankind to program a machine.",
+                "They smashed his looms in the streets of Lyon, terrified of a machine that could remember. Joseph died in isolation, forgotten by the very hands he tried to liberate.",
+                "They didn't understand... once the thread of logic is spun, you cannot unweave it. The residue remains.",
             ],
         },
         2 => Scene {
             title: "\u{2014} THE UNFINISHED ENGINE \u{2014}",
             image_rel: "babbage_outro.png",
             lines: &[
-                "The government withdrew its funding. The great engine was never completed in his lifetime.",
-                "Babbage died embittered, his masterpiece a heap of precise brass \u{2014} a mind a century ahead of its tools.",
+                "The British Crown withdrew the gold. Charles died embittered, leaving his masterpiece a heap of cold brass \u{2014} a ghost born a century before its time.",
+                "They called him a madman. I know how it feels... to build a cathedral of thought, only to be left rotting in its shadow.",
             ],
         },
         3 => Scene {
             title: "\u{2014} ENCHANTRESS OF NUMBERS \u{2014}",
             image_rel: "lovelace_outro.png",
             lines: &[
-                "Cancer took Ada at thirty-six. Her notes gathered dust, dismissed as a poet's daydream.",
-                "A hundred years would pass before the world understood she had written the first program of all.",
+                "Cancer took her at thirty-six. Her notes gathered dust, dismissed as a poet's daughter's dream. A hundred years would pass before the world understood that she had already written the first line of the future.",
+                "Blood and numbers... both fade so quickly.",
             ],
         },
         4 => Scene {

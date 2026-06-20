@@ -489,11 +489,13 @@ pub fn handle_input(
             if puzzle.cursor > 0 {
                 puzzle.cursor -= 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
             if puzzle.cursor + 1 < puzzle.symbols.len() {
                 puzzle.cursor += 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Char('0') | KeyCode::Char('1') => {
             if let Some(&sym) = puzzle.symbols.get(puzzle.cursor) {

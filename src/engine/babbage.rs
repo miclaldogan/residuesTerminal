@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::state::{Act, GlobalStateContext, ScreenState};
 use super::mind_log::{DialogueEngine, Speaker, VoiceCue};
+use super::audio::AudioEngine;
 use super::layout;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,6 +496,7 @@ pub fn handle_babbage_input(
     puzzle: &mut BabbagePuzzle,
     state: &mut GlobalStateContext,
     dialogue: &mut DialogueEngine,
+    audio: &mut AudioEngine,
 ) {
     // Acknowledging a shattered drive resets the engine — never a dead key.
     if puzzle.locked {
@@ -533,11 +535,13 @@ pub fn handle_babbage_input(
         match key.code {
             KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => {
                 puzzle.cursor_col = puzzle.cursor_col.saturating_sub(1);
+                audio.grid_nav();
             }
             KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => {
                 if puzzle.cursor_col < 2 {
                     puzzle.cursor_col += 1;
                 }
+                audio.grid_nav();
             }
             KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => match puzzle.phase {
                 BabbagePhase::MethodOfDifferences => {
@@ -567,6 +571,7 @@ pub fn handle_babbage_input(
                     puzzle.carry_buffers[puzzle.cursor_col] = now;
                     let s = if now { "installed" } else { "removed" };
                     puzzle.push_log(format!("Delay buffer D{} {}.", puzzle.cursor_col, s), LogKind::Info);
+                    audio.menu_confirm(); // heavy latch on a structural decision
                 }
             }
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -574,10 +579,12 @@ pub fn handle_babbage_input(
                     if delays_in_phase(&puzzle.carry_buffers) {
                         puzzle.crank_active = true;
                         puzzle.crank_frame = 0;
+                        audio.babbage_gears(); // brass cogs roll as the engine compiles
                         puzzle.push_log("Cranking \u{2014} the carry begins to travel...".into(), LogKind::Info);
                     } else {
                         // ── OUT-OF-PHASE CRUNCH: a delay pulls before its turn and
                         //    the whole drive shatters at once. ──
+                        audio.gear_jam(); // sharp metallic jam on a calculation fault
                         trigger_crunch(puzzle, state, dialogue);
                     }
                 }

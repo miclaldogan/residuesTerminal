@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -45,22 +46,39 @@ const SFX_KEY: &str = "sfx/daktiloOne.mp3";
 const SFX_KEY_FAST: &str = "sfx/daktiloFast.mp3";
 /// Heavy, deliberate mechanical click — the Turing tape head sliding cell to cell.
 const SFX_HEAD: &str = "sfx/Slow_deliberate_key__#4-1781700108983.mp3";
-/// The slow, deliberate mechanical key — the menu-selection confirmation click.
-const SFX_MENU_CLICK: &str = "sfx/Slow_deliberate_key__#1-1781700096418.mp3";
-const SFX_BACKSPACE: &str = "sfx/daktilo_backspace_snap.mp3";
+/// Ada's backspace — the clean, ultra-short mechanical snap (the long #1 take looped
+/// for ~5 s and bled over the editing flow; #2 is clamped to a tight ~200 ms window).
+const SFX_BACKSPACE: &str = "sfx/daktilo_backspace_snap#2.mp3";
 const SFX_GLITCH: &str = "sfx/electrical_short_glitch.mp3";
 const SFX_HEARTBEAT: &str = "sfx/heartbeat_base.mp3";
+
+// ── Tactile interface SFX ────────────────────────────────────────────────────
+/// Short subtle click on main-menu navigation (up/down/WASD).
+const SFX_MENU_NAV: &str = "sfx/menu_nav.mp3";
+/// Vintage terminal key-tap on every puzzle-grid cursor move (Arrows/WASD).
+const SFX_GRID_NAV: &str = "sfx/grid_nav.mp3";
+/// Heavy mechanical latch — menu selection + Space heavy state toggles (gate cycle, locks).
+const SFX_MENU_CONFIRM: &str = "sfx/menu_confirm.mp3";
+/// Rhythmic wooden shuttle slide — Jacquard loom card/carriage operations.
+const SFX_LOOM: &str = "sfx/loom_shuttle.mp3";
+/// Rolling brass cog sequence — the Babbage engine cranking/compiling.
+const SFX_GEARS: &str = "sfx/babbage_gears.mp3";
+/// Sharp metallic gear jam — a Babbage out-of-phase calculation fault.
+const SFX_GEAR_JAM: &str = "sfx/daktilo_clack_fault.mp3";
 
 // ── Volume ceilings (player-percent, 100 = nominal) ─────────────────────────
 const HEARTBEAT_VOLUME: u8 = 62;
 const BACKSPACE_VOLUME: u8 = 88;
 const GLITCH_VOLUME: u8 = 92;
 const SPEECH_VOLUME: u8 = 100;
-const MENU_CLICK_VOLUME: u8 = 90;
 const KEY_FALLBACK_VOLUME: u8 = 80;
 /// Cap on simultaneously-sounding clacks, so mashing a key can't pile detached players
 /// into an overlapping smear — extra strikes past this are dropped until some finish.
 const MAX_CONCURRENT_CLACKS: usize = 4;
+/// Same idea for the one-shot interface SFX pool (nav taps, latches, shuttles).
+const MAX_CONCURRENT_SFX: usize = 6;
+/// paplay linear volume scale: 0x10000 == 100%.
+const PAPLAY_FULL: u32 = 65_536;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Player {
@@ -131,44 +149,100 @@ pub struct AudioEngine {
     speech: Option<Child>,      // one-shot voice line; replaces itself each play
     clacks: Vec<Child>,         // per-letter typewriter strikes, reaped lazily
     sfx: Vec<Child>,            // misc one-shot SFX (backspace, glitch), reaped lazily
-    clack_wav: Option<String>,  // pre-decoded WAV for low-latency paplay clacks
+    prep: HashMap<&'static str, String>, // pre-trimmed WAVs for low-latency paplay
     base: PathBuf,              // resolved `audio/` directory (CWD-independent)
     muted: bool,                // master mute, toggled from the main menu
 }
 
-/// Pre-decode the typewriter clack to a WAV and confirm `paplay` exists. A WAV +
-/// paplay starts in ~milliseconds, so firing one per keystroke can't choke the
-/// heavier speech `mpv` the way spawning an mpv per letter would.
-fn prepare_clack(base: &Path) -> Option<String> {
-    let has = |bin: &str| {
-        Command::new(bin)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    };
-    if !has("paplay") || !has("ffmpeg") {
+/// Short SFX to pre-trim into low-latency WAVs at startup: `(rel, max_ms)`. `max_ms`
+/// hard-caps the output length (e.g. Ada's backspace → 200 ms). Every one also has its
+/// leading silence below −45 dB stripped, so the snap lands frame-perfect on the keypress.
+const PREP_SET: &[(&str, Option<u32>)] = &[
+    (SFX_KEY, None),
+    (SFX_KEY_FAST, None),
+    (SFX_BACKSPACE, Some(200)),
+    (SFX_MENU_NAV, Some(220)),
+    (SFX_GRID_NAV, Some(200)),
+    (SFX_MENU_CONFIRM, Some(500)),
+    (SFX_LOOM, Some(500)),
+    (SFX_GEARS, None),
+    (SFX_GEAR_JAM, Some(350)),
+];
+
+/// Is `bin` runnable on PATH?
+fn has_bin(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Pre-decode one SFX to a WAV with its leading silence (< −45 dB) stripped and, when
+/// given, its length hard-clamped. A WAV + `paplay` starts in ~milliseconds with zero
+/// leading dead-air, so the feedback lands on the exact tick of the input event.
+fn prepare_short(base: &Path, rel: &str, max_ms: Option<u32>) -> Option<String> {
+    let src = base.join(rel);
+    if !src.is_file() {
         return None;
     }
-    let src = base.join(SFX_KEY);
-    let dst = std::env::temp_dir().join("residues_key.wav");
-    let ok = Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "quiet", "-i"])
+    let stem: String = rel
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dst = std::env::temp_dir().join(format!("residues_{}.wav", stem));
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-loglevel", "quiet", "-i"])
         .arg(&src)
-        .arg(&dst)
+        // Strip leading silence below −45 dB → no input-to-sound latency.
+        .arg("-af")
+        .arg("silenceremove=start_periods=1:start_threshold=-45dB");
+    if let Some(ms) = max_ms {
+        cmd.arg("-t").arg(format!("{:.3}", ms as f32 / 1000.0));
+    }
+    cmd.arg(&dst);
+    let ok = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if ok {
+    if ok && dst.is_file() {
         Some(dst.to_string_lossy().into_owned())
     } else {
         None
     }
+}
+
+/// Pre-trim the whole short-SFX set once (requires `paplay` + `ffmpeg`). Missing files or
+/// missing tools simply leave the entry absent → the player falls back to spawning the
+/// original mp3, so the engine degrades gracefully.
+fn prepare_short_set(base: &Path) -> HashMap<&'static str, String> {
+    let mut m = HashMap::new();
+    if !has_bin("paplay") || !has_bin("ffmpeg") {
+        return m;
+    }
+    for (rel, max_ms) in PREP_SET {
+        if let Some(wav) = prepare_short(base, rel, *max_ms) {
+            m.insert(*rel, wav);
+        }
+    }
+    m
+}
+
+/// Fire a pre-trimmed WAV through low-latency `paplay`.
+fn play_paplay(wav: &str, volume: u32) -> Option<Child> {
+    Command::new("paplay")
+        .arg(format!("--volume={}", volume))
+        .arg(wav)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
 }
 
 impl AudioEngine {
@@ -178,7 +252,7 @@ impl AudioEngine {
     pub fn new() -> Self {
         let player = detect_player();
         let base = resolve_audio_base();
-        let clack_wav = prepare_clack(&base);
+        let prep = prepare_short_set(&base);
         Self {
             player,
             ambient: Vec::new(),
@@ -187,7 +261,7 @@ impl AudioEngine {
             speech: None,
             clacks: Vec::new(),
             sfx: Vec::new(),
-            clack_wav,
+            prep,
             base,
             muted: false,
         }
@@ -212,9 +286,35 @@ impl AudioEngine {
         }
     }
 
-    /// The slow, deliberate confirmation click fired when a menu choice is committed.
-    pub fn menu_click(&mut self) {
-        self.fire_oneshot(SFX_MENU_CLICK, MENU_CLICK_VOLUME);
+    /// Heavy mechanical latch — a committed menu selection, or a Space-bar heavy state
+    /// toggle (Boole gate cycle, structural puzzle locks).
+    pub fn menu_confirm(&mut self) {
+        self.fire_short(SFX_MENU_CONFIRM, (PAPLAY_FULL * 9 / 10) as u32, 90);
+    }
+
+    /// Short subtle click on main-menu navigation (up/down/WASD).
+    pub fn menu_nav(&mut self) {
+        self.fire_short(SFX_MENU_NAV, PAPLAY_FULL * 7 / 10, 72);
+    }
+
+    /// Vintage terminal key-tap on a puzzle-grid cursor move (Arrows/WASD).
+    pub fn grid_nav(&mut self) {
+        self.fire_short(SFX_GRID_NAV, PAPLAY_FULL * 7 / 10, 72);
+    }
+
+    /// Rhythmic wooden shuttle slide — a Jacquard loom card/carriage operation.
+    pub fn loom_shuttle(&mut self) {
+        self.fire_short(SFX_LOOM, PAPLAY_FULL * 4 / 5, 84);
+    }
+
+    /// Rolling brass cogs — the Babbage engine cranking through a compilation run.
+    pub fn babbage_gears(&mut self) {
+        self.fire_short(SFX_GEARS, PAPLAY_FULL * 4 / 5, 84);
+    }
+
+    /// Sharp metallic jam — a Babbage out-of-phase calculation fault.
+    pub fn gear_jam(&mut self) {
+        self.fire_short(SFX_GEAR_JAM, PAPLAY_FULL, 92);
     }
 
     /// Spin up the perpetual ambient beds (rain, bump, background score, pendulum).
@@ -338,16 +438,11 @@ impl AudioEngine {
         if self.clacks.len() >= MAX_CONCURRENT_CLACKS {
             return;
         }
-        let child = if let Some(wav) = &self.clack_wav {
-            // Low-latency PulseAudio/PipeWire path — won't starve the speech stream.
-            Command::new("paplay")
-                .arg("--volume=42000")
-                .arg(wav)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok()
+        let child = if let Some(wav) = self.prep.get(SFX_KEY) {
+            // Low-latency, silence-stripped PulseAudio/PipeWire path: the clack lands on
+            // the exact tick the glyph is pushed, with no leading dead-air — so the
+            // typewriter audio stays in lockstep with the appearing letters.
+            play_paplay(wav, PAPLAY_FULL * 2 / 3)
         } else {
             self.spawn(SFX_KEY, false, KEY_FALLBACK_VOLUME)
         };
@@ -359,18 +454,48 @@ impl AudioEngine {
     /// A high-frequency typewriter click for rapid binary-path entry (Shannon). Pooled
     /// and capped exactly like the regular clack so fast 0/1 entry can't smear.
     pub fn daktilo_fast(&mut self) {
+        if self.muted {
+            return;
+        }
         self.clacks.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
         if self.clacks.len() >= MAX_CONCURRENT_CLACKS {
             return;
         }
-        if let Some(c) = self.spawn(SFX_KEY_FAST, false, KEY_FALLBACK_VOLUME) {
+        let child = if let Some(wav) = self.prep.get(SFX_KEY_FAST) {
+            play_paplay(wav, PAPLAY_FULL * 2 / 3)
+        } else {
+            self.spawn(SFX_KEY_FAST, false, KEY_FALLBACK_VOLUME)
+        };
+        if let Some(c) = child {
             self.clacks.push(c);
         }
     }
 
-    /// The heavy mechanical snap of a Backspace correction / fumbled-line clear.
+    /// The clean, ultra-short mechanical snap of a Backspace correction (clamped to a
+    /// ~200 ms window — no more 5-second bleed in Ada's editor).
     pub fn backspace_snap(&mut self) {
-        self.fire_oneshot(SFX_BACKSPACE, BACKSPACE_VOLUME);
+        self.fire_short(SFX_BACKSPACE, PAPLAY_FULL * 4 / 5, BACKSPACE_VOLUME);
+    }
+
+    /// Fire a short interface SFX: the low-latency pre-trimmed WAV via `paplay` when
+    /// available, else the original mp3 through the detached player. Pooled and capped so
+    /// rapid input can't pile detached processes into a smear.
+    fn fire_short(&mut self, rel: &str, paplay_vol: u32, fallback_vol: u8) {
+        if self.muted {
+            return;
+        }
+        self.sfx.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if self.sfx.len() >= MAX_CONCURRENT_SFX {
+            return;
+        }
+        let child = if let Some(wav) = self.prep.get(rel) {
+            play_paplay(wav, paplay_vol)
+        } else {
+            self.spawn(rel, false, fallback_vol)
+        };
+        if let Some(c) = child {
+            self.sfx.push(c);
+        }
     }
 
     /// The sharp electrical blowout — a mis-struck gate or a failed `R` verification.

@@ -853,11 +853,13 @@ pub fn handle_input(
             if puzzle.cursor_line > 0 {
                 puzzle.cursor_line -= 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
             if puzzle.cursor_line + 1 < puzzle.source.len() {
                 puzzle.cursor_line += 1;
             }
+            audio.grid_nav();
         }
         KeyCode::Enter => {
             puzzle.editing = true;
