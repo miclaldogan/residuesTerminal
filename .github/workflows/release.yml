@@ -1,0 +1,86 @@
+name: Release
+
+# Build the prebuilt, asset-bundled tarballs that `run.sh` downloads, and attach them
+# to the GitHub Release for the pushed tag. Each tarball contains the compiled
+# `residues_terminal` binary together with the `audio/` and `images/` directories at
+# its root, so the AudioEngine / ImageEngine resolve their assets next to the binary.
+#
+# Trigger:  git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+  # Allow a manual dry-run build from the Actions tab (no release upload).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-13
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build (release)
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball (binary + audio/ + images/)
+        run: |
+          set -eu
+          PKG="residues_terminal-${{ matrix.os }}-${{ matrix.arch }}"
+          STAGE="dist/${PKG}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/residues_terminal" "${STAGE}/"
+          cp -R audio  "${STAGE}/"
+          cp -R images "${STAGE}/"
+          # Root-level layout: residues_terminal, audio/, images/ — so the assets
+          # extract directly beside the binary.
+          tar -czf "dist/${PKG}.tar.gz" -C "${STAGE}" .
+          ls -lh "dist/${PKG}.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: residues_terminal-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/residues_terminal-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/residues_terminal-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          fail_on_unmatched_files: true
