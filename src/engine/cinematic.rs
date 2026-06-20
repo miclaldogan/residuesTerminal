@@ -187,7 +187,7 @@ pub fn render_intro(
     awaiting_enter: bool,
 ) {
     let scene = intro(act_id);
-    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.08);
+    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.08, 0);
 }
 
 /// Render an outro scene: the figure's downfall, with a touch more interference to
@@ -201,7 +201,37 @@ pub fn render_outro(
     awaiting_enter: bool,
 ) {
     let scene = outro(act_id);
-    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.16);
+    // The bitten-apple finale (Act VI) lifts its image 5 rows clear of the dialogue box.
+    let img_gap = if act_id >= 6 { 5 } else { 0 };
+    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.16, img_gap);
+}
+
+/// The closing credits — a pitch-black viewport with the title/byline dead-centre and a
+/// softly blinking exit prompt at the foot. Shown after the bitten-apple finale, before
+/// the player drops back to the menu.
+pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64) {
+    let buf = f.buffer_mut();
+    let void = Color::Rgb(0, 0, 0);
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = buf.get_mut(x, y);
+            cell.set_char(' ');
+            cell.fg = void;
+            cell.bg = void;
+        }
+    }
+
+    // Centre block — desaturated retro grey.
+    let cy = area.y + area.height / 2;
+    put_center(buf, area, cy.saturating_sub(1), "RESIDUES \u{2014} An Engine of Residual Minds", Color::Rgb(150, 140, 120));
+    put_center(buf, area, cy + 1, "Developed by Iclal Dogan", Color::Rgb(110, 102, 86));
+
+    // Foot — a quiet system epitaph and a blinking exit prompt.
+    let py = area.y + area.height.saturating_sub(3);
+    put_center(buf, area, py, "[SYSTEM]: Simulation terminated. Memory matrices permanently archived.", Color::Rgb(70, 66, 56));
+    let on = (frame / 24) % 2 == 0;
+    let prompt_col = if on { Color::Rgb(140, 130, 110) } else { Color::Rgb(58, 54, 46) };
+    put_center(buf, area, py + 1, "[ Press ENTER to exit the mind ]", prompt_col);
 }
 
 fn render_scene(
@@ -212,6 +242,7 @@ fn render_scene(
     frame: u64,
     awaiting_enter: bool,
     glitch: f32,
+    img_bottom_gap: u16,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -236,7 +267,9 @@ fn render_scene(
     let title_y = area.y;
     let text_h: u16 = 6.min(area.height.saturating_sub(2));
     let img_y = area.y + 2;
-    let img_h = area.height.saturating_sub(2 + text_h + 1);
+    // `img_bottom_gap` lifts the image clear of the narration band (used by the apple
+    // finale) by shrinking the image band from the bottom — extra black breathing room.
+    let img_h = area.height.saturating_sub(2 + text_h + 1 + img_bottom_gap);
 
     // Title.
     {

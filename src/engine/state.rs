@@ -42,6 +42,9 @@ pub enum ScreenState {
     /// Cinematic — the tragic outcome of the act just completed, shown before the next
     /// act's intro. Same field semantics as [`ScreenState::ActIntro`].
     ActOutro { act_id: u8, text_index: usize, timer: u64 },
+    /// The final black credits screen, reached after the Act VI bitten-apple finale.
+    /// ENTER here returns to the main menu.
+    FinalCredits,
 }
 
 impl ScreenState {

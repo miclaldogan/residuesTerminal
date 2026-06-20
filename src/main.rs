@@ -362,6 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the resume point and the cap on the act picker; replaying an *earlier* act never
     // regresses it, so the saved progress is preserved.
     let mut furthest_act = state.current_act;
+    // Latches true once the player is on the Turing workspace; keeps its dedicated score
+    // playing through the finale + credits, reset only at the menu.
+    let mut turing_score_active = false;
     let mut prev_snapped = false;
     let mut prev_jammed = false;
     // Fractional-beat accumulator: each tick adds `bpm/3750` of a beat (62.5 fps × 60s);
@@ -423,6 +426,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ScreenState::ActOutro { act_id, .. } => {
                     let awaiting = !dialogue.is_typing();
                     cinematic::render_outro(f, size, act_id, &dialogue, state.frame_counter, awaiting);
+                }
+                // ── The closing black credits screen. ──
+                ScreenState::FinalCredits => {
+                    cinematic::render_final_credits(f, size, state.frame_counter);
                 }
             }
         })?;
@@ -654,24 +661,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     audio.stop_voice_tracks();
                                     if act_id >= 6 {
-                                        // The final act's outro just ended — the journey is
-                                        // complete. Return to the candlelit menu (progress
-                                        // persists; every act is replayable from the picker).
-                                        // Reset every puzzle so a replay starts clean rather
-                                        // than re-entering a solved board.
-                                        jacquard_puzzle = JacquardPuzzle::new();
-                                        babbage_puzzle = BabbagePuzzle::new();
-                                        lovelace_puzzle = lovelace::LovelacePuzzle::new();
-                                        boole_puzzle = boole::BoolePuzzle::new();
-                                        shannon_puzzle = shannon::ShannonPuzzle::new();
-                                        turing_core = turing::TuringCore::new();
-                                        state.screen_state = ScreenState::MainMenu;
-                                        menu = MainMenu::new(engine::save::load().as_ref());
+                                        // The bitten-apple finale just ended — break into the
+                                        // black credits screen (the Act VI score keeps
+                                        // looping; it is only swapped back at the menu).
+                                        state.screen_state = ScreenState::FinalCredits;
                                     } else {
                                         let next_id = cinematic::id_from_act(state.current_act);
                                         enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
                                     }
                                 }
+                            }
+                        }
+                        // ── Black credits: ENTER flushes the run and returns to the menu,
+                        //    where the dedicated score swaps back to the default mix. ──
+                        ScreenState::FinalCredits => {
+                            if key.code == KeyCode::Enter {
+                                audio.stop_voice_tracks();
+                                // Reset every puzzle so a replay starts clean.
+                                jacquard_puzzle = JacquardPuzzle::new();
+                                babbage_puzzle = BabbagePuzzle::new();
+                                lovelace_puzzle = lovelace::LovelacePuzzle::new();
+                                boole_puzzle = boole::BoolePuzzle::new();
+                                shannon_puzzle = shannon::ShannonPuzzle::new();
+                                turing_core = turing::TuringCore::new();
+                                // Drop into a fresh menu (the tick restores the default score).
+                                state.screen_state = ScreenState::MainMenu;
+                                menu = MainMenu::new(engine::save::load().as_ref());
                             }
                         }
                     }
@@ -692,9 +707,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Act VI gets its own score the moment the player is on the Turing workspace;
             // every other context (menu, prelude, other acts, cinematics) plays the
             // default. Switching here each tick keeps the transition crisp and reversible.
-            let on_turing_desk = state.current_act == Act::Turing1936_1950
-                && state.screen_state.desk_visible();
-            audio.set_act_music(on_turing_desk);
+            // The dedicated Act VI score latches on the moment the player reaches the
+            // Turing workspace and persists through the bitten-apple finale AND the black
+            // credits — it is only torn down (back to the default mix) at the main menu.
+            if state.screen_state == ScreenState::MainMenu {
+                turing_score_active = false;
+            } else if state.current_act == Act::Turing1936_1950 && state.screen_state.desk_visible() {
+                turing_score_active = true;
+            }
+            audio.set_act_music(turing_score_active);
 
             // Heartbeat metronome — fire beats at the live BPM. A `0.0` BPM is the
             // arrhythmia skip window, where no beat fires (the silence is the skip).
@@ -755,6 +776,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ScreenState::ActOutro { act_id, text_index, timer } => {
                     state.screen_state = ScreenState::ActOutro { act_id, text_index, timer: timer.wrapping_add(1) };
                 }
+                // The credits simply breathe; the prompt blink is driven by the frame counter.
+                ScreenState::FinalCredits => {}
                 // Phase 2: nothing advances; the world simply breathes and reveals.
                 ScreenState::AmbientDesk => {}
                 // Phase 3: the live simulation runs.

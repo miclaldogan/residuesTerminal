@@ -87,12 +87,12 @@ struct Residue {
     target: u8,
 }
 
-/// A single Imitation-Game split interrogation: three branching voices, exactly one of
-/// which is the true childhood memory the player must isolate.
+/// A single Imitation-Game split interrogation: the on-screen prompt (question + three
+/// inline 1/2/3 options) and the 0-based index of the true answer the player must isolate.
 struct Interrogation {
-    voices: [(&'static str, &'static str); 3], // (speaker tag, line)
-    correct: usize,                            // index of the true memory
-    timer: u16,                                // frames remaining to answer
+    prompt: &'static str, // "[IMITATION] … \u{2014} 1:… | 2:… | 3:…"
+    correct: usize,       // 0-based index of the true answer
+    timer: u16,           // frames remaining to answer
 }
 
 /// The climactic Universal-Machine puzzle state.
@@ -316,32 +316,79 @@ fn rep_byte(sym: Sym) -> u8 {
 // Imitation-Game content
 // ─────────────────────────────────────────────────────────────────────────────
 
-const INTERROGATIONS: &[([(&str, &str); 3], usize)] = &[
-    (
-        [
-            ("INVESTIGATOR", "Admit the machine was the lie, not the man."),
-            ("MEMORY", "Christopher, breath fogging the cold Sherborne glass."),
-            ("MACHINE", "I AM YOU. THERE IS NO DIFFERENCE BETWEEN US."),
-        ],
-        1,
-    ),
-    (
-        [
-            ("MACHINE", "TERMINATE THE ORGANIC SUBROUTINE. SUBMIT."),
-            ("INVESTIGATOR", "You will sign the confession. Now."),
-            ("MEMORY", "The daisy chain, the snow, his hand in mine."),
-        ],
-        2,
-    ),
-    (
-        [
-            ("MEMORY", "An apple, cut clean. The sweet almond hush."),
-            ("INVESTIGATOR", "Name the others. Name them and it ends."),
-            ("MACHINE", "YOUR THOUGHTS ARE MY OUTPUT. COMPLY."),
-        ],
-        0,
-    ),
+/// One chronological interrogation: the spoken mind-stream log line and the on-screen
+/// prompt with its three inline options. `correct` is 0-based (1/2/3 keys → 0/1/2).
+struct InterroDef {
+    log: &'static str,
+    prompt: &'static str,
+    correct: usize,
+}
+
+/// The five progressive milestones of Alan Turing's life, indexed by the player's
+/// stabilised-residue count (0..4) — never random, so the Imitation Game reads as a
+/// chronological story rather than thematic noise. Options map [1] Investigator,
+/// [2] Memory, [3] Machine.
+const INTERROGATIONS: [InterroDef; 5] = [
+    InterroDef {
+        log: "I imagined a machine of infinite patience: a tape, a single head...",
+        prompt: "[IMITATION] What bounds the architecture of a mechanical mind? \u{2014} 1:The Crown Registry | 2:Human Sorrow | 3:The Infinite Tape",
+        correct: 2,
+    },
+    InterroDef {
+        log: "Christopher... he died so young. Can the spirit survive the breakdown of the physical clockwork?",
+        prompt: "[IMITATION] Where does consciousness wander when the system halts? \u{2014} 1:Official Obituary | 2:Christopher's Ghost | 3:The Open Relay",
+        correct: 1,
+    },
+    InterroDef {
+        log: "We broke Enigma. We saved millions. Yet, the Official Secrets Act binds my tongue.",
+        prompt: "[IMITATION] You saved an empire that demands your erasure. Who holds the master key? \u{2014} 1:The Secrets Act | 2:Hut 8 Memoirs | 3:The Bombe's Drums",
+        correct: 0,
+    },
+    InterroDef {
+        log: "Stand before the bench. Prosecuted for who I am. A gross indecency.",
+        prompt: "[IMITATION] Define your deviation to the eyes of the law. \u{2014} 1:Gross Indecency Charge | 2:Solitary Remorse | 3:Logical Paradox",
+        correct: 0,
+    },
+    InterroDef {
+        log: "They make me take the pills. The flesh is failing. Drawing closer to the sweet almond hush...",
+        prompt: "[IMITATION] The organic channel is corrupted by poison. What is the final state? \u{2014} 1:Police Dossier | 2:The Bitten Apple | 3:System Shutdown",
+        correct: 1,
+    },
 ];
+
+/// Word-wrap a string to `max_w`-wide lines (breaking on spaces; an over-long token is
+/// hard-split). Used to lay the interrogation prompt across the narrow centre panel.
+fn wrap_text(text: &str, max_w: usize) -> Vec<String> {
+    let max_w = max_w.max(1);
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if word.chars().count() > max_w {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let chars: Vec<char> = word.chars().collect();
+            let mut i = 0;
+            while chars.len() - i > max_w {
+                lines.push(chars[i..i + max_w].iter().collect());
+                i += max_w;
+            }
+            cur = chars[i..].iter().collect();
+        } else if cur.is_empty() {
+            cur.push_str(word);
+        } else if cur.chars().count() + 1 + word.chars().count() <= max_w {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SAFE BUFFER WRITE HELPERS
@@ -480,12 +527,12 @@ pub fn render_workspace(f: &mut Frame, area: Rect, state: &mut GlobalStateContex
             Style::default().fg(FAIL_FG).bg(WS_BG),
         );
         deck_y += 1;
-        for (i, (tag, _line)) in inter.voices.iter().enumerate() {
+        // The chronological prompt + its inline 1/2/3 options, wrapped to the panel.
+        for line in wrap_text(inter.prompt, inner_w as usize) {
             if deck_y >= y0 + h.saturating_sub(2) {
                 break;
             }
-            let s = format!("  [{}] {}", i + 1, tag);
-            buf_set_str(buf, inner_x, deck_y, &clip(&s, inner_w as usize), Style::default().fg(SECTION_FG).bg(WS_BG));
+            buf_set_str(buf, inner_x, deck_y, &line, Style::default().fg(SECTION_FG).bg(WS_BG));
             deck_y += 1;
         }
         deck_y += 1;
@@ -856,14 +903,19 @@ pub fn tick_turing(
     }
     core.interro_timer = INTERROGATION_PERIOD;
 
-    // Spawn a fresh split interrogation, feeding its voices into the mind stream.
-    let idx = (state.frame_counter as usize / 7) % INTERROGATIONS.len();
-    let (voices, correct) = INTERROGATIONS[idx];
-    core.interrogation = Some(Interrogation { voices, correct, timer: INTERROGATION_WINDOW });
-    core.push_log("[IMITATION] split interrogation \u{2014} 1:Court  2:Memory  3:Machine.".to_string(), LogKind::Warning);
+    // Progressive matrix: the active question is tied to the player's progression — the
+    // number of residues already stabilised (0..4) — so each correct answer advances the
+    // story to the next chronological milestone. No randomness.
+    let idx = core.stabilised_count().min(INTERROGATIONS.len() - 1);
+    let def = &INTERROGATIONS[idx];
+    core.interrogation = Some(Interrogation {
+        prompt: def.prompt,
+        correct: def.correct,
+        timer: INTERROGATION_WINDOW,
+    });
+    core.push_log("[IMITATION] split interrogation \u{2014} isolate the true memory (1/2/3).".to_string(), LogKind::Warning);
     if !dialogue.is_typing() {
-        let line = format!("[{}]: {}", voices[0].0, voices[0].1);
-        dialogue.play(Speaker::System, &line, Some(VoiceCue::PoliceBootstep));
+        dialogue.play(Speaker::System, def.log, Some(VoiceCue::PoliceBootstep));
     }
 }
 
@@ -879,6 +931,30 @@ mod tests {
             .collect();
         for (pos, target) in targets {
             core.infinite_tape[pos] = target;
+        }
+    }
+
+    #[test]
+    fn interrogation_matrix_is_five_progressive_and_well_formed() {
+        // One question per residue, in chronological order; correct index always valid;
+        // each prompt carries its three inline options.
+        assert_eq!(INTERROGATIONS.len(), 5);
+        for def in INTERROGATIONS.iter() {
+            assert!(def.correct < 3, "answer index must be 0/1/2");
+            assert!(def.prompt.contains("1:") && def.prompt.contains("2:") && def.prompt.contains("3:"));
+            assert!(!def.log.is_empty());
+        }
+        // The active question index tracks the player's stabilised-residue progression.
+        let core = TuringCore::new();
+        let idx = core.stabilised_count().min(INTERROGATIONS.len() - 1);
+        assert_eq!(idx, 0); // fresh tape → milestone 0 (the Infinite Tape)
+        assert_eq!(INTERROGATIONS[0].correct, 2);
+    }
+
+    #[test]
+    fn wrap_text_never_exceeds_width() {
+        for line in wrap_text(INTERROGATIONS[2].prompt, 28) {
+            assert!(line.chars().count() <= 28);
         }
     }
 
