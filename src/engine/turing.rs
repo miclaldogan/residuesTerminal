@@ -187,6 +187,38 @@ impl TuringCore {
             .count()
     }
 
+    /// Stabilise the next still-corrupt residue (lowest tape position), writing its
+    /// target byte onto the tape. Returns `true` if one was stabilised — the mutation
+    /// that lets a correctly-isolated memory advance `RESIDUES: N/5 stable`.
+    fn stabilize_next(&mut self) -> bool {
+        let mut entries: Vec<(usize, usize)> =
+            self.residue_at.iter().map(|(&p, &r)| (p, r)).collect();
+        entries.sort_by_key(|&(p, _)| p);
+        for (pos, ri) in entries {
+            if self.cell(pos) != self.residues[ri].target {
+                if pos < self.infinite_tape.len() {
+                    self.infinite_tape[pos] = self.residues[ri].target;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Force every residue to its stable target (the F10 demo fast-forward).
+    fn stabilize_all(&mut self) {
+        let entries: Vec<(usize, u8)> = self
+            .residue_at
+            .iter()
+            .map(|(&p, &r)| (p, self.residues[r].target))
+            .collect();
+        for (pos, target) in entries {
+            if pos < self.infinite_tape.len() {
+                self.infinite_tape[pos] = target;
+            }
+        }
+    }
+
     /// Execute one finite-control transition. Bounds are saturated and the tape grows
     /// at most to `MAX_TAPE`, so this can never panic or grow without limit.
     fn step(&mut self) {
@@ -361,6 +393,16 @@ fn clip(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Draw the bottom status gauge, clamping the line to the strict inner width
+/// (`area.width - 4`) so a long prompt (e.g. "[IMITATION] split interrogation...") can
+/// never bleed past the centre panel's right vertical border. The flanking border
+/// tokens stay rigid and uniform regardless of the status string's length.
+fn draw_status_footer(buf: &mut Buffer, area: Rect, msg: &str, col: Color) {
+    let max_line_w = area.width.saturating_sub(4) as usize;
+    let clamped: String = msg.chars().take(max_line_w).collect();
+    layout::draw_gauge_footer(buf, area, &clamped, col);
+}
+
 fn state_name(s: State) -> &'static str {
     match s {
         State::A => "A",
@@ -403,7 +445,7 @@ pub fn render_workspace(f: &mut Frame, area: Rect, state: &mut GlobalStateContex
     if core.solved {
         draw_victory(buf, area, frame);
         if let Some((msg, _)) = core.status_log.last() {
-            layout::draw_gauge_footer(buf, area, msg, OK_FG);
+            draw_status_footer(buf, area, msg, OK_FG);
         }
         return;
     }
@@ -461,7 +503,7 @@ pub fn render_workspace(f: &mut Frame, area: Rect, state: &mut GlobalStateContex
             LogKind::Warning => TEXT_FG,
             LogKind::Success => OK_FG,
         };
-        layout::draw_gauge_footer(buf, area, msg, col);
+        draw_status_footer(buf, area, msg, col);
     }
 }
 
@@ -654,12 +696,19 @@ pub fn handle_input(
     if core.interrogation.is_some() {
         if let KeyCode::Char(c @ '1'..='3') = key.code {
             let pick = (c as u8 - b'1') as usize;
-            answer_interrogation(core, state, audio, pick);
+            answer_interrogation(core, state, dialogue, audio, pick);
             return;
         }
     }
 
     match key.code {
+        // Hidden developer shortcut (demo-recording safeguard): F10 resolves the whole
+        // deck matrix, maxes RESIDUES to 5/5, runs to HALT, and fires the final ending.
+        KeyCode::F(10) => {
+            core.stabilize_all();
+            core.run();
+            trigger_victory(core, state, dialogue);
+        }
         KeyCode::Left => {
             if core.head_position > 0 {
                 core.head_position -= 1;
@@ -698,18 +747,7 @@ pub fn handle_input(
         KeyCode::Enter => {
             core.run();
             if core.current_state == State::Halt && core.residues_all_stable() {
-                core.solved = true;
-                core.push_log("HALT reached on a stabilised tape. The computation resolves.".to_string(), LogKind::Success);
-                if !state.acts_completed.contains(&Act::Turing1936_1950) {
-                    state.acts_completed.push(Act::Turing1936_1950);
-                }
-                // Settle the heart for the outro.
-                state.arrhythmia_multiplier = 0.0;
-                dialogue.play(
-                    Speaker::Turing,
-                    "[TURING]: \"The machine halts. Every ghost accounted for, every residue resolved. Let the tape run on, quietly, into the dark.\"",
-                    Some(VoiceCue::Victory(Act::Turing1936_1950)),
-                );
+                trigger_victory(core, state, dialogue);
             } else if core.current_state == State::Halt {
                 core.push_log("Halted early on a blank — residues remain corrupt. Stabilise them all.".to_string(), LogKind::Warning);
             } else {
@@ -720,15 +758,59 @@ pub fn handle_input(
     }
 }
 
-fn answer_interrogation(core: &mut TuringCore, state: &mut GlobalStateContext, audio: &mut AudioEngine, pick: usize) {
+fn answer_interrogation(
+    core: &mut TuringCore,
+    state: &mut GlobalStateContext,
+    dialogue: &mut DialogueEngine,
+    audio: &mut AudioEngine,
+    pick: usize,
+) {
     let correct = core.interrogation.as_ref().map(|i| i.correct).unwrap_or(0);
     core.interrogation = None;
     if pick == correct {
+        // Steady the pulse and stabilise the next act residue — isolating a true memory
+        // mutates the tape and advances RESIDUES: N/5 stable.
         state.arrhythmia_multiplier = 0.0;
-        core.push_log("[IMITATION] true memory isolated \u{2014} the pulse steadies.".to_string(), LogKind::Success);
+        audio.menu_confirm();
+        if core.stabilize_next() {
+            let n = core.stabilised_count();
+            let total = core.residues.len();
+            core.push_log(
+                format!("[IMITATION] true memory isolated \u{2014} residue stabilised ({}/{}).", n, total),
+                LogKind::Success,
+            );
+        } else {
+            core.push_log("[IMITATION] true memory isolated \u{2014} the pulse steadies.".to_string(), LogKind::Success);
+        }
+        // Every residue stable → run to HALT and route into the closing cinematic.
+        if core.residues_all_stable() {
+            core.run();
+            trigger_victory(core, state, dialogue);
+        }
     } else {
         interrogation_penalty(core, state, audio);
     }
+}
+
+/// Resolve the climax: mark the act complete, settle the heart, and play Turing's final
+/// line. `core.solved` flips here; the main loop watches for it and, once the line has
+/// streamed, routes into the closing Act-VI outro cinematic (the bitten apple) and on to
+/// the menu — so the endgame never freezes or loops. Idempotent.
+fn trigger_victory(core: &mut TuringCore, state: &mut GlobalStateContext, dialogue: &mut DialogueEngine) {
+    if core.solved {
+        return;
+    }
+    core.solved = true;
+    core.push_log("HALT reached on a stabilised tape. The computation resolves.".to_string(), LogKind::Success);
+    if !state.acts_completed.contains(&Act::Turing1936_1950) {
+        state.acts_completed.push(Act::Turing1936_1950);
+    }
+    state.arrhythmia_multiplier = 0.0;
+    dialogue.play(
+        Speaker::Turing,
+        "[TURING]: \"The machine halts. Every ghost accounted for, every residue resolved. Let the tape run on, quietly, into the dark.\"",
+        Some(VoiceCue::Victory(Act::Turing1936_1950)),
+    );
 }
 
 /// The cost of failing to isolate the true memory: the heart spikes past 140 BPM, the
@@ -838,6 +920,56 @@ mod tests {
                 assert!(t.contains_key(&(st, sym)), "missing rule for {:?},{:?}", st, sym);
             }
         }
+    }
+
+    #[test]
+    fn isolating_memories_stabilises_residues_to_full() {
+        // Each correctly-isolated memory stabilises one residue; five reach 5/5, at
+        // which point the tape halts cleanly (the endgame trigger condition).
+        let mut core = TuringCore::new();
+        assert_eq!(core.stabilised_count(), 0);
+        let total = core.residues.len();
+        for i in 1..=total {
+            assert!(core.stabilize_next());
+            assert_eq!(core.stabilised_count(), i);
+        }
+        assert!(!core.stabilize_next(), "nothing left to stabilise at 5/5");
+        assert!(core.residues_all_stable());
+        core.head_position = 0;
+        core.run();
+        assert_eq!(core.current_state, State::Halt);
+    }
+
+    #[test]
+    fn f10_stabilize_all_resolves_the_deck() {
+        let mut core = TuringCore::new();
+        core.stabilize_all();
+        assert!(core.residues_all_stable());
+        assert_eq!(core.stabilised_count(), core.residues.len());
+    }
+
+    #[test]
+    fn status_footer_never_overruns_the_right_border() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut core = TuringCore::new();
+        core.status_log.clear();
+        core.push_log(
+            "[IMITATION] split interrogation \u{2014} 1:Court 2:Memory 3:Machine, far beyond the panel edge".to_string(),
+            LogKind::Warning,
+        );
+        let mut state = GlobalStateContext::new();
+        state.screen_state = ScreenState::ActivePuzzle;
+        let (w, h) = (30u16, 18u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            render_workspace(f, Rect::new(0, 0, w, h), &mut state, &core);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        // The right border column must stay the box border on the footer text row —
+        // the long status line is clamped to width-4 and can never reach it.
+        let sym = buf.get(w - 1, h - 2).symbol().to_string();
+        assert_eq!(sym, "\u{2502}", "footer status bled onto/past the right border");
     }
 
     #[test]

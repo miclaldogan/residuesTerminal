@@ -653,8 +653,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     dialogue.play(Speaker::System, lines[ni], None);
                                 } else {
                                     audio.stop_voice_tracks();
-                                    let next_id = cinematic::id_from_act(state.current_act);
-                                    enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
+                                    if act_id >= 6 {
+                                        // The final act's outro just ended — the journey is
+                                        // complete. Return to the candlelit menu (progress
+                                        // persists; every act is replayable from the picker).
+                                        // Reset every puzzle so a replay starts clean rather
+                                        // than re-entering a solved board.
+                                        jacquard_puzzle = JacquardPuzzle::new();
+                                        babbage_puzzle = BabbagePuzzle::new();
+                                        lovelace_puzzle = lovelace::LovelacePuzzle::new();
+                                        boole_puzzle = boole::BoolePuzzle::new();
+                                        shannon_puzzle = shannon::ShannonPuzzle::new();
+                                        turing_core = turing::TuringCore::new();
+                                        state.screen_state = ScreenState::MainMenu;
+                                        menu = MainMenu::new(engine::save::load().as_ref());
+                                    } else {
+                                        let next_id = cinematic::id_from_act(state.current_act);
+                                        enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
+                                    }
                                 }
                             }
                         }
@@ -763,6 +779,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             acts_completed: state.acts_completed.clone(),
                         });
                         enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(completed));
+                    }
+
+                    // ── Endgame: Turing is the final act, so its win never advances
+                    //    current_act (no next act). Instead, once its victory line has
+                    //    streamed out, route straight into the closing Act-VI outro
+                    //    cinematic — the bitten-apple monologue — which then returns to
+                    //    the menu. This keeps the ending from freezing on the solved card. ──
+                    if state.current_act == Act::Turing1936_1950
+                        && turing_core.solved
+                        && !dialogue.is_typing()
+                    {
+                        // Persist the completion before the cinematic.
+                        engine::save::save(&engine::save::SaveState {
+                            current_act: furthest_act,
+                            acts_completed: state.acts_completed.clone(),
+                        });
+                        enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(Act::Turing1936_1950));
                     }
 
                     // Jacquard failure voice hooks (rising-edge detection).
