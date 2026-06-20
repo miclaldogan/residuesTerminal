@@ -60,6 +60,14 @@ pub enum LogKind {
     Success,
 }
 
+/// Which widget the cursor is on. Left/Right shift focus between the symbol list (where
+/// 0/1 build codes) and the CHANNEL box (where the PARITY guard is toggled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Symbols,
+    Channel,
+}
+
 /// The interactive state of the Act V Shannon information-channel puzzle.
 pub struct ShannonPuzzle {
     pub raw_message: &'static str,
@@ -69,6 +77,7 @@ pub struct ShannonPuzzle {
     pub bandwidth: f32,           // W
     pub symbols: Vec<char>,       // unique symbols in first-appearance order
     pub cursor: usize,            // selected symbol row
+    pub focus: Focus,             // which widget Left/Right navigation is on
     pub phase: ShannonPhase,
     pub parity_guard: bool,       // Hamming(7,4) error-correction allocated?
     pub status_log: Vec<(String, LogKind)>,
@@ -104,6 +113,7 @@ impl ShannonPuzzle {
             bandwidth: BANDWIDTH,
             symbols,
             cursor: 0,
+            focus: Focus::Symbols,
             phase: ShannonPhase::Compress,
             parity_guard: false,
             status_log: vec![
@@ -427,8 +437,10 @@ fn draw_channel_card(
     let h: u16 = 8;
     let rect = Rect::new(x, top, width, h);
     draw_box(buf, rect, Style::default().fg(BORDER_FG).bg(WS_BG));
+    let focused = puzzle.focus == Focus::Channel;
     let title = clip(" CHANNEL ", width.saturating_sub(2) as usize);
-    buf_set_str(buf, x + 1, top, &title, Style::default().fg(HEADER_FG).bg(WS_BG));
+    let title_col = if focused { CURSOR_FG } else { HEADER_FG };
+    buf_set_str(buf, x + 1, top, &title, Style::default().fg(title_col).bg(WS_BG));
 
     let total = puzzle.total_bits();
     let cap = puzzle.capacity_bits();
@@ -460,9 +472,17 @@ fn draw_channel_card(
         (format!("PARITY {}", if puzzle.parity_guard { "ON" } else { "off" }), if puzzle.parity_guard { OK_FG } else { DIM_FG }),
         (format!("STATUS {}", status.0), status.1),
     ];
+    // The PARITY row (index 3) is the CHANNEL box's one interactive control — when the
+    // box is focused, mark it with a ▸ cursor and brighten it so the toggle is obvious.
+    const PARITY_ROW: usize = 3;
     let mut ry = top + 1;
-    for (text, color) in rows {
-        buf_set_str(buf, x + 1, ry, &clip(&text, inner), Style::default().fg(color).bg(WS_BG));
+    for (i, (text, color)) in rows.into_iter().enumerate() {
+        let (line, col) = if focused && i == PARITY_ROW {
+            (format!("\u{25B8} {}", text), CURSOR_FG)
+        } else {
+            (text, color)
+        };
+        buf_set_str(buf, x + 1, ry, &clip(&line, inner), Style::default().fg(col).bg(WS_BG));
         ry += 1;
     }
 }
@@ -485,19 +505,44 @@ pub fn handle_input(
     }
 
     match key.code {
-        KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => {
-            if puzzle.cursor > 0 {
-                puzzle.cursor -= 1;
-            }
+        // ── Horizontal focus shift between the symbol list and the CHANNEL box, so the
+        //    PARITY toggle is reachable with standard TUI navigation. ──
+        KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => {
+            puzzle.focus = Focus::Symbols;
             audio.grid_nav();
         }
-        KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
-            if puzzle.cursor + 1 < puzzle.symbols.len() {
-                puzzle.cursor += 1;
-            }
+        KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => {
+            puzzle.focus = Focus::Channel;
             audio.grid_nav();
+        }
+        // Vertical: move the symbol cursor when the list is focused; toggle the parity
+        // guard when the CHANNEL box is focused.
+        KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => match puzzle.focus {
+            Focus::Symbols => {
+                if puzzle.cursor > 0 {
+                    puzzle.cursor -= 1;
+                }
+                audio.grid_nav();
+            }
+            Focus::Channel => toggle_parity(puzzle, audio),
+        },
+        KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => match puzzle.focus {
+            Focus::Symbols => {
+                if puzzle.cursor + 1 < puzzle.symbols.len() {
+                    puzzle.cursor += 1;
+                }
+                audio.grid_nav();
+            }
+            Focus::Channel => toggle_parity(puzzle, audio),
+        },
+        // Enter/Space activates the focused widget's control (the CHANNEL parity toggle).
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if puzzle.focus == Focus::Channel {
+                toggle_parity(puzzle, audio);
+            }
         }
         KeyCode::Char('0') | KeyCode::Char('1') => {
+            puzzle.focus = Focus::Symbols; // typing a bit implies the symbol list
             if let Some(&sym) = puzzle.symbols.get(puzzle.cursor) {
                 let code = puzzle.bit_allocations.entry(sym).or_default();
                 if code.chars().count() < MAX_CODE_LEN {
@@ -515,22 +560,34 @@ pub fn handle_input(
                 }
             }
         }
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            if puzzle.phase == ShannonPhase::ErrorCorrect {
-                puzzle.parity_guard = !puzzle.parity_guard;
-                let msg = if puzzle.parity_guard {
-                    "Hamming(7,4) parity guard allocated \u{2014} single-bit flips correctable.".to_string()
-                } else {
-                    "Parity guard removed \u{2014} the channel is exposed to noise.".to_string()
-                };
-                puzzle.push_log(msg, LogKind::Info);
-            }
+        // Direct parity hotkey — works at any time during Act V, regardless of focus or
+        // phase, so the player can always flip the guard without hunting for the widget.
+        KeyCode::Char('p') | KeyCode::Char('P') => toggle_parity(puzzle, audio),
+        // Hidden developer shortcut (demo-recording safeguard): F10 force-allocates the
+        // parity guard and runs Phase 2 verification, cleanly driving the successful
+        // transition into the Act Outro. Not surfaced in the on-screen controls.
+        KeyCode::F(10) => {
+            puzzle.phase = ShannonPhase::ErrorCorrect;
+            puzzle.parity_guard = true;
+            verify(puzzle, state, dialogue, audio);
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             verify(puzzle, state, dialogue, audio);
         }
         _ => {}
     }
+}
+
+/// Flip the Hamming(7,4) parity guard, log the change, and fire the heavy confirm latch.
+fn toggle_parity(puzzle: &mut ShannonPuzzle, audio: &mut AudioEngine) {
+    puzzle.parity_guard = !puzzle.parity_guard;
+    let msg = if puzzle.parity_guard {
+        "Hamming(7,4) parity guard allocated \u{2014} single-bit flips correctable.".to_string()
+    } else {
+        "Parity guard removed \u{2014} the channel is exposed to noise.".to_string()
+    };
+    puzzle.push_log(msg, LogKind::Info);
+    audio.menu_confirm();
 }
 
 /// Verify the current phase. Phase 1 enforces the entropy/capacity ceiling and prefix
@@ -609,6 +666,15 @@ mod tests {
         let p = ShannonPuzzle::new();
         // C = 6 * log2(1 + 7) = 6 * 3 = 18.
         assert_eq!(p.capacity_bits(), 18);
+    }
+
+    #[test]
+    fn focus_starts_on_the_symbol_list() {
+        // Left/Right shift this between the symbol list and the CHANNEL box so the
+        // PARITY toggle is reachable; the guard starts off.
+        let p = ShannonPuzzle::new();
+        assert_eq!(p.focus, Focus::Symbols);
+        assert!(!p.parity_guard);
     }
 
     #[test]
