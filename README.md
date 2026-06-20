@@ -25,6 +25,14 @@ Each act is a real computational toy — not a reskinned button-press. You don't
 
 ---
 
+## Atmosphere & Presentation
+
+The screen is a three-panel cockpit: a left **narrative log** that types Turing's collapsing mind-stream a character at a time, the central **workspace** where the act's machine lives, and a right **candlelit desk** — an overlapping dossier stack lit by a single half-block candle that acts as a true light source, with a radial light-degradation pass bathing the whole panel. The candle physically **melts down** as the night wears on (full in Act I, a guttering ~5% ember by Act VI), and the dossier card carries the act's atmospheric scene, dimmed so it reads as lit by the flame rather than self-lit. As the chemical dosage climbs, the text and imagery decay into structural static.
+
+Each act opens with a **cinematic portrait + biography** of its mind and closes with a **tragic outro**, both rendered by a real PNG → truecolor half-block engine and synced to spoken voice-overs. Underneath it all runs a live **heartbeat metronome** whose tempo tracks Turing's vitals, an ambient rain-and-score bed, and a layer of binaural "Memory Echo" whispers that pan between your ears on headphones. The whole thing resolves in a hardcoded closing sequence — a falling-binary dissolve and a quiet final reckoning.
+
+---
+
 ## Running the Game
 
 ### Quick start (from source)
@@ -86,13 +94,13 @@ brew install mpv
 | **macOS** | Expected to work (`run.sh` supports Darwin; `mpv`/`ffplay` available). The PulseAudio low-latency SFX path is absent, so those fall back to the main player — degraded, not broken. |
 | **Windows** | Untested / unsupported for now |
 
-64/64 unit tests passing (`cargo test`), covering the assembly interpreter, Shannon capacity/entropy, Boole gate algebra, the Turing machine's transition completeness and halt conditions, and layout smoke tests down to 20×8 terminals.
+68/68 unit tests passing (`cargo test`), covering the assembly interpreter, Shannon capacity/entropy, Boole gate algebra, the Turing machine's transition completeness and halt conditions, the interrogation prompt layout, the desk dossier word-wrap, the audio filter chain, and layout smoke tests down to 20×8 terminals.
 
 ---
 
 ## Built With
 
-- **Rust** — ~10,400 lines across 17 modules
+- **Rust** — ~11,700 lines across 17 modules
 - **[ratatui](https://ratatui.rs/)** + **[crossterm](https://github.com/crossterm-rs/crossterm)** — the TUI
 - A crate-free, lock-free audio engine that spawns detached OS players
 - A real PNG/JPEG → truecolor half-block pixel-art renderer for the cinematic portraits
