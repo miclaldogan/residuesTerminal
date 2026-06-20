@@ -28,8 +28,8 @@ const MENU_BACKDROP: &str = "openingBg.png";
 /// layout without any brittle index arithmetic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
-    /// Restore the checkpoint and drop straight onto the saved act's desk.
-    Continue,
+    /// Open the act picker to re-enter any unlocked act.
+    SelectAct,
     /// Wipe any existing save and boot the cinematic prelude from Act I.
     NewGame,
     /// Flip the audio master mute.
@@ -38,16 +38,50 @@ pub enum MenuAction {
     Exit,
 }
 
+/// Which screen the menu is currently showing: the top-level choices, or the act
+/// picker reached from "RE-ENTER THE MIND".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuMode {
+    Main,
+    ActSelect,
+}
+
+/// Canonical act order, used to enumerate the unlocked acts in the picker.
+const ACT_ORDER: [Act; 6] = [
+    Act::Jacquard1804,
+    Act::Babbage1837,
+    Act::Lovelace1843,
+    Act::Boole1854,
+    Act::Shannon1937,
+    Act::Turing1936_1950,
+];
+
+/// A short one-line act label for the picker rows.
+fn act_title(act: Act) -> &'static str {
+    match act {
+        Act::Jacquard1804 => "ACT I    \u{00B7}  JACQUARD  \u{00B7}  1804",
+        Act::Babbage1837 => "ACT II   \u{00B7}  BABBAGE   \u{00B7}  1837",
+        Act::Lovelace1843 => "ACT III  \u{00B7}  LOVELACE  \u{00B7}  1843",
+        Act::Boole1854 => "ACT IV   \u{00B7}  BOOLE     \u{00B7}  1854",
+        Act::Shannon1937 => "ACT V    \u{00B7}  SHANNON   \u{00B7}  1937",
+        Act::Turing1936_1950 => "ACT VI   \u{00B7}  TURING    \u{00B7}  1936",
+    }
+}
+
 pub struct MainMenu {
     pub selected: usize,
     /// True when a valid checkpoint exists — drives the Continue vs. New Game label.
     pub has_save: bool,
-    /// The act to drop the player into when Continue is chosen.
+    /// The furthest act reached — the resume point and the cap on the act picker.
     pub resume_act: Act,
-    /// Restored progress vector, handed back to the global state on Continue.
+    /// Restored progress vector, handed back to the global state on re-entry.
     pub acts_completed: Vec<Act>,
     /// The audio master toggle the player flips from this screen.
     pub audio_on: bool,
+    /// Top-level choices vs. the act picker.
+    pub mode: MenuMode,
+    /// Cursor within the act picker (0-based over the unlocked acts).
+    pub act_cursor: usize,
 }
 
 impl MainMenu {
@@ -61,6 +95,8 @@ impl MainMenu {
                 resume_act: s.current_act,
                 acts_completed: s.acts_completed.clone(),
                 audio_on: true,
+                mode: MenuMode::Main,
+                act_cursor: 0,
             },
             None => Self {
                 selected: 0,
@@ -68,8 +104,45 @@ impl MainMenu {
                 resume_act: Act::Jacquard1804,
                 acts_completed: Vec::new(),
                 audio_on: true,
+                mode: MenuMode::Main,
+                act_cursor: 0,
             },
         }
+    }
+
+    /// How many acts the player has unlocked (1-based count up to the furthest reached).
+    pub fn unlocked_count(&self) -> usize {
+        act_index(self.resume_act) as usize
+    }
+
+    /// The unlocked acts, oldest first — the rows shown in the picker.
+    pub fn unlocked_acts(&self) -> Vec<Act> {
+        ACT_ORDER[..self.unlocked_count().min(ACT_ORDER.len())].to_vec()
+    }
+
+    /// Enter the act picker, parking the cursor on the furthest (latest) act so a quick
+    /// double-Enter behaves exactly like the old "continue at the latest act".
+    pub fn open_act_select(&mut self) {
+        self.mode = MenuMode::ActSelect;
+        self.act_cursor = self.unlocked_count().saturating_sub(1);
+    }
+
+    /// The act the picker cursor is on.
+    pub fn selected_act(&self) -> Act {
+        let acts = self.unlocked_acts();
+        acts[self.act_cursor.min(acts.len().saturating_sub(1))]
+    }
+
+    /// Picker cursor up, wrapping against the unlocked-act count.
+    pub fn act_up(&mut self) {
+        let n = self.unlocked_count().max(1);
+        self.act_cursor = (self.act_cursor + n - 1) % n;
+    }
+
+    /// Picker cursor down, wrapping against the unlocked-act count.
+    pub fn act_down(&mut self) {
+        let n = self.unlocked_count().max(1);
+        self.act_cursor = (self.act_cursor + 1) % n;
     }
 
     /// Number of selectable rows: 4 when a save exists (Continue + Erase + Audio +
@@ -85,7 +158,7 @@ impl MainMenu {
         let audio = format!("AUDIO  [{}]", if self.audio_on { "ON" } else { "OFF" });
         if self.has_save {
             vec![
-                (format!("[1] RE-ENTER THE MIND  (Continue Act {})", act_index(self.resume_act)), MenuAction::Continue),
+                ("[1] RE-ENTER THE MIND  (Choose Act)".to_string(), MenuAction::SelectAct),
                 ("[2] ERASE MEMORY CORE  (Restart / New Game)".to_string(), MenuAction::NewGame),
                 (format!("[3] {}", audio), MenuAction::AudioToggle),
                 ("[4] EXIT TO SHELL".to_string(), MenuAction::Exit),
@@ -254,6 +327,12 @@ pub fn render_main_menu(f: &mut Frame, area: Rect, menu: &MainMenu, frame: u64) 
     let cx = area.x + area.width / 2;
     let compact = area.width < 50 || area.height < 22;
 
+    // The act picker is its own composition, drawn over the same backdrop.
+    if menu.mode == MenuMode::ActSelect {
+        render_act_select(buf, area, menu, cx, compact);
+        return;
+    }
+
     // 2. Dynamic option list — 3 rows fresh, 4 rows with a save (the extra ERASE row).
     let options = menu.options();
 
@@ -325,6 +404,81 @@ pub fn render_main_menu(f: &mut Frame, area: Rect, menu: &MainMenu, frame: u64) 
 
     // 8. Footer control legend, pinned to the lower margin (range tracks the list size).
     let footer = format!("↑/↓ or 1–{} · ENTER confirm · ESC quit", options.len());
+    let fy = area.y + area.height.saturating_sub(2);
+    put_str(buf, cx.saturating_sub(footer.chars().count() as u16 / 2), fy, &footer, FOOTER);
+}
+
+/// The act picker reached from "RE-ENTER THE MIND": a bordered card listing every
+/// unlocked act (locked future acts are simply absent), with a ✓ on completed acts and
+/// the cursor parked on the latest. Selecting one re-enters that act's desk.
+fn render_act_select(buf: &mut Buffer, area: Rect, menu: &MainMenu, cx: u16, compact: bool) {
+    let acts = menu.unlocked_acts();
+    let cursor = menu.act_cursor.min(acts.len().saturating_sub(1));
+
+    // Build the row labels once: "[n] ACT … 1854   ✓".
+    let rows: Vec<String> = acts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let done = if menu.acts_completed.contains(a) { "  ✓" } else { "" };
+            format!("[{}] {}{}", i + 1, act_title(*a), done)
+        })
+        .collect();
+
+    if compact {
+        let mut y = area.y + area.height / 2;
+        y = y.saturating_sub(2 + rows.len() as u16 / 2);
+        let title = "SELECT ACT";
+        put_str(buf, cx.saturating_sub(title.chars().count() as u16 / 2), y, title, ITEM_HOT);
+        y += 2;
+        for (i, label) in rows.iter().enumerate() {
+            let sel = i == cursor;
+            let line = format!("{}{}", if sel { "> " } else { "  " }, label);
+            let color = if sel { ITEM_HOT } else { ITEM_DIM };
+            put_str(buf, cx.saturating_sub(line.chars().count() as u16 / 2), y + i as u16, &line, color);
+        }
+        return;
+    }
+
+    // Full composition: a heading and a panel that grows with the unlocked-act count.
+    let panel_h: u16 = rows.len() as u16 * 2 + 3;
+    let cluster_h: u16 = 1 + 2 + panel_h; // heading, gap, panel
+    let start_y = area.y + area.height.saturating_sub(cluster_h) / 2;
+    let start_y = start_y.max(area.y + 1);
+
+    let heading = "— SELECT THE ACT TO RE-ENTER —";
+    put_str(buf, cx.saturating_sub(heading.chars().count() as u16 / 2), start_y, heading, SUBTITLE);
+
+    let panel_w: u16 = 46.min(area.width.saturating_sub(6));
+    let panel_x = cx.saturating_sub(panel_w / 2);
+    let panel_y = start_y + 3;
+    for y in panel_y..panel_y + panel_h {
+        for x in panel_x..panel_x + panel_w {
+            put(buf, x, y, ' ', PANEL_FILL, PANEL_FILL);
+        }
+    }
+    draw_panel(buf, panel_x, panel_y, panel_w, panel_h);
+
+    let inner_x = panel_x + 1;
+    let inner_w = panel_w.saturating_sub(2);
+    for (i, label) in rows.iter().enumerate() {
+        let row_y = panel_y + 2 + i as u16 * 2;
+        let sel = i == cursor;
+        let (fg, bg, marker) = if sel {
+            (ITEM_HOT, SELECT_BG, '▶')
+        } else {
+            (ITEM_DIM, bg_at(buf, inner_x, row_y), ' ')
+        };
+        for x in inner_x..inner_x + inner_w {
+            put(buf, x, row_y, ' ', fg, bg);
+        }
+        put(buf, inner_x + 1, row_y, marker, fg, bg);
+        for (j, ch) in label.chars().enumerate() {
+            put(buf, inner_x + 3 + j as u16, row_y, ch, fg, bg);
+        }
+    }
+
+    let footer = format!("↑/↓ or 1–{} · ENTER play · ESC back", rows.len());
     let fy = area.y + area.height.saturating_sub(2);
     put_str(buf, cx.saturating_sub(footer.chars().count() as u16 / 2), fy, &footer, FOOTER);
 }
@@ -402,21 +556,58 @@ mod tests {
     }
 
     #[test]
-    fn save_layout_exposes_a_distinct_erase_and_continue_row() {
+    fn save_layout_exposes_select_act_and_erase_rows() {
         let sv = SaveState { current_act: Act::Shannon1937, acts_completed: vec![] };
         let with = MainMenu::new(Some(&sv));
         let opts = with.options();
         assert_eq!(opts.len(), 4);
-        assert_eq!(opts[0].1, MenuAction::Continue);
-        assert!(opts[0].0.contains("Continue Act 5")); // act number is live
+        assert_eq!(opts[0].1, MenuAction::SelectAct); // RE-ENTER opens the act picker
         assert_eq!(opts[1].1, MenuAction::NewGame); // ERASE MEMORY CORE is always present
         assert_eq!(opts[3].1, MenuAction::Exit);
 
-        // Fresh layout: 3 rows, the first is New Game, no Continue/Erase split.
+        // Fresh layout: 3 rows, the first is New Game, no SelectAct/Erase split.
         let without = MainMenu::new(None);
         let fopts = without.options();
         assert_eq!(fopts.len(), 3);
         assert_eq!(fopts[0].1, MenuAction::NewGame);
-        assert!(fopts.iter().all(|(_, a)| *a != MenuAction::Continue));
+        assert!(fopts.iter().all(|(_, a)| *a != MenuAction::SelectAct));
+    }
+
+    #[test]
+    fn act_picker_unlocks_exactly_up_to_the_furthest_act() {
+        // Reached Act IV (Boole) → acts I–IV unlocked, V/VI absent.
+        let sv = SaveState { current_act: Act::Boole1854, acts_completed: vec![Act::Jacquard1804] };
+        let mut m = MainMenu::new(Some(&sv));
+        assert_eq!(m.unlocked_count(), 4);
+        let acts = m.unlocked_acts();
+        assert_eq!(acts, vec![Act::Jacquard1804, Act::Babbage1837, Act::Lovelace1843, Act::Boole1854]);
+        assert!(!acts.contains(&Act::Shannon1937));
+        assert!(!acts.contains(&Act::Turing1936_1950));
+
+        // Opening the picker parks the cursor on the latest act and wraps in-bounds.
+        m.open_act_select();
+        assert_eq!(m.mode, MenuMode::ActSelect);
+        assert_eq!(m.act_cursor, 3);
+        assert_eq!(m.selected_act(), Act::Boole1854);
+        m.act_down();
+        assert_eq!(m.act_cursor, 0); // wrapped past the end
+        assert_eq!(m.selected_act(), Act::Jacquard1804);
+        m.act_up();
+        assert_eq!(m.act_cursor, 3);
+    }
+
+    #[test]
+    fn act_picker_renders_without_panic() {
+        let sv = SaveState { current_act: Act::Turing1936_1950, acts_completed: vec![Act::Jacquard1804] };
+        let mut m = MainMenu::new(Some(&sv));
+        m.open_act_select();
+        for (w, h) in [(120u16, 40u16), (80, 24), (40, 14), (20, 8)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let s = f.size();
+                render_main_menu(f, s, &m, 0);
+            })
+            .unwrap();
+        }
     }
 }

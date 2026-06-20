@@ -6,7 +6,7 @@ use ratatui::Terminal;
 mod engine;
 use crate::engine::state::{Act, GlobalStateContext, ScreenState};
 use crate::engine::audio::AudioEngine;
-use crate::engine::menu::{self, MainMenu, MenuAction};
+use crate::engine::menu::{self, MainMenu, MenuAction, MenuMode};
 use crate::engine::cinematic;
 use crate::engine::layout::EngineLayout;
 use crate::engine::desk_render::render_desk;
@@ -349,6 +349,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prelude_idx: usize = 0;
     let mut prelude_hold: u16 = LINE_GAP;
     let mut last_act = state.current_act;
+    // The furthest act ever reached this session — the checkpoint high-water mark. It is
+    // the resume point and the cap on the act picker; replaying an *earlier* act never
+    // regresses it, so the saved progress is preserved.
+    let mut furthest_act = state.current_act;
     let mut prev_snapped = false;
     let mut prev_jammed = false;
     // Fractional-beat accumulator: each tick adds `bpm/3750` of a beat (62.5 fps × 60s);
@@ -424,75 +428,108 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                     // Ignore key-release / non-press events.
                 } else if key.code == KeyCode::Esc {
-                    restore_terminal();
-                    return Ok(());
+                    // In the act picker, Esc steps back to the main menu instead of
+                    // quitting; everywhere else it exits the game.
+                    if state.screen_state == ScreenState::MainMenu && menu.mode == MenuMode::ActSelect {
+                        menu.mode = MenuMode::Main;
+                    } else {
+                        restore_terminal();
+                        return Ok(());
+                    }
                 } else {
                     match state.screen_state {
                         // ── Phase 0: main-menu navigation. Number keys jump-and-select;
                         //    arrows/W-S move the cursor; Enter/Space commit. Every commit
                         //    fires the deliberate confirmation click. ──
-                        ScreenState::MainMenu => {
-                            let n = menu.option_count();
-                            let mut activate = false;
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => menu.up(),
-                                KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => menu.down(),
-                                // Number keys jump-and-select, bound-checked against the
-                                // active list length (3 fresh / 4 with a save) so an out-
-                                // of-range digit is simply ignored — never a panic.
-                                KeyCode::Char(c @ '1'..='9') => {
-                                    let idx = c as usize - '1' as usize;
-                                    if idx < n {
-                                        menu.selected = idx;
-                                        activate = true;
+                        ScreenState::MainMenu => match menu.mode {
+                            // ── Top-level choices. Number keys jump-and-select;
+                            //    arrows/W-S move the cursor; Enter/Space commit. ──
+                            MenuMode::Main => {
+                                let n = menu.option_count();
+                                let mut activate = false;
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => menu.up(),
+                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => menu.down(),
+                                    // Bound-checked against the active list length so an
+                                    // out-of-range digit is simply ignored — never a panic.
+                                    KeyCode::Char(c @ '1'..='9') => {
+                                        let idx = c as usize - '1' as usize;
+                                        if idx < n {
+                                            menu.selected = idx;
+                                            activate = true;
+                                        }
                                     }
+                                    KeyCode::Enter | KeyCode::Char(' ') => activate = true,
+                                    _ => {}
                                 }
-                                KeyCode::Enter | KeyCode::Char(' ') => activate = true,
-                                _ => {}
-                            }
-                            if activate {
-                                audio.menu_click();
-                                // Map the highlighted row to its semantic action, so the
-                                // handler is identical for the 3- and 4-row layouts.
-                                match menu.selected_action() {
-                                    // Restore the checkpoint, straight onto the saved desk.
-                                    MenuAction::Continue => {
-                                        state.current_act = menu.resume_act;
-                                        state.acts_completed = menu.acts_completed.clone();
-                                        state.screen_state = ScreenState::AmbientDesk;
-                                        state.desk_reveal = 0.0;
-                                        state.lookup_active = false;
-                                        last_act = state.current_act;
-                                        prelude_idx = PRELUDE_SCRIPT.len().saturating_sub(1);
-                                        dialogue.play(Speaker::System, AMBIENT_PROMPT, None);
-                                    }
-                                    // Fresh start (incl. "Erase Memory Core"): purge the
-                                    // save, reset progress, and boot the cinematic prelude.
-                                    MenuAction::NewGame => {
-                                        engine::save::clear();
-                                        state.current_act = Act::Jacquard1804;
-                                        state.acts_completed.clear();
-                                        last_act = state.current_act;
-                                        state.screen_state = ScreenState::NarrativePrelude;
-                                        prelude_idx = 0;
-                                        prelude_hold = LINE_GAP;
-                                        let cue = VoiceCue::PreludeLine(1);
-                                        let frames = audio.duration_frames(cue.marker());
-                                        dialogue.play_script(Speaker::Turing, PRELUDE_SCRIPT[0], Some(cue), frames);
-                                    }
-                                    // Toggle the audio master mute (stay on the menu).
-                                    MenuAction::AudioToggle => {
-                                        menu.audio_on = !menu.audio_on;
-                                        audio.set_muted(!menu.audio_on);
-                                    }
-                                    // Quit to the shell.
-                                    MenuAction::Exit => {
-                                        restore_terminal();
-                                        return Ok(());
+                                if activate {
+                                    audio.menu_click();
+                                    match menu.selected_action() {
+                                        // Open the act picker (cursor on the latest act).
+                                        MenuAction::SelectAct => menu.open_act_select(),
+                                        // Fresh start (incl. "Erase Memory Core"): purge the
+                                        // save, reset progress, boot the cinematic prelude.
+                                        MenuAction::NewGame => {
+                                            engine::save::clear();
+                                            state.current_act = Act::Jacquard1804;
+                                            state.acts_completed.clear();
+                                            last_act = state.current_act;
+                                            furthest_act = state.current_act;
+                                            state.screen_state = ScreenState::NarrativePrelude;
+                                            prelude_idx = 0;
+                                            prelude_hold = LINE_GAP;
+                                            let cue = VoiceCue::PreludeLine(1);
+                                            let frames = audio.duration_frames(cue.marker());
+                                            dialogue.play_script(Speaker::Turing, PRELUDE_SCRIPT[0], Some(cue), frames);
+                                        }
+                                        // Toggle the audio master mute (stay on the menu).
+                                        MenuAction::AudioToggle => {
+                                            menu.audio_on = !menu.audio_on;
+                                            audio.set_muted(!menu.audio_on);
+                                        }
+                                        // Quit to the shell.
+                                        MenuAction::Exit => {
+                                            restore_terminal();
+                                            return Ok(());
+                                        }
                                     }
                                 }
                             }
-                        }
+                            // ── Act picker: choose any unlocked act to re-enter. ──
+                            MenuMode::ActSelect => {
+                                let n = menu.unlocked_count();
+                                let mut play = false;
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => menu.act_up(),
+                                    KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => menu.act_down(),
+                                    KeyCode::Char(c @ '1'..='9') => {
+                                        let idx = c as usize - '1' as usize;
+                                        if idx < n {
+                                            menu.act_cursor = idx;
+                                            play = true;
+                                        }
+                                    }
+                                    KeyCode::Enter | KeyCode::Char(' ') => play = true,
+                                    _ => {}
+                                }
+                                if play {
+                                    audio.menu_click();
+                                    // Re-enter the chosen act's desk. The high-water mark is
+                                    // preserved (= the saved furthest act), so replaying an
+                                    // earlier act never regresses the saved progress.
+                                    let chosen = menu.selected_act();
+                                    furthest_act = menu.resume_act;
+                                    state.current_act = chosen;
+                                    state.acts_completed = menu.acts_completed.clone();
+                                    last_act = chosen;
+                                    state.screen_state = ScreenState::AmbientDesk;
+                                    state.desk_reveal = 0.0;
+                                    state.lookup_active = false;
+                                    prelude_idx = PRELUDE_SCRIPT.len().saturating_sub(1);
+                                    dialogue.play(Speaker::System, AMBIENT_PROMPT, None);
+                                }
+                            }
+                        },
                         // ── Phase 1: gated monologue; the workspace is sealed off. ──
                         ScreenState::NarrativePrelude => {
                             if dialogue.is_typing() {
@@ -619,10 +656,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.tick();
             dialogue.tick();
 
-            // Past the prelude, the rain + pendulum ambient beds run (idempotent).
-            if state.screen_state.desk_visible() {
-                audio.ensure_ambient();
-            }
+            // The ambient beds (rain, low bump, background score, pendulum) run
+            // continuously from the very first frame — the main menu included — and
+            // loop for the whole session. Idempotent + mute-guarded, so it is safe to
+            // call every tick regardless of screen state.
+            audio.ensure_ambient();
 
             // Heartbeat metronome — fire beats at the live BPM. A `0.0` BPM is the
             // arrhythmia skip window, where no beat fires (the silence is the skip).
@@ -702,9 +740,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let completed = last_act;
                         last_act = state.current_act;
                         state.lookup_active = false;
-                        // Checkpoint: an act was just cleared and a new one begun.
+                        // Advance the high-water mark, but never below it — replaying an
+                        // earlier act and finishing it must not regress the saved furthest.
+                        if cinematic::id_from_act(state.current_act) > cinematic::id_from_act(furthest_act) {
+                            furthest_act = state.current_act;
+                        }
+                        // Checkpoint: persist the furthest act reached, not the act in play.
                         engine::save::save(&engine::save::SaveState {
-                            current_act: state.current_act,
+                            current_act: furthest_act,
                             acts_completed: state.acts_completed.clone(),
                         });
                         enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(completed));
