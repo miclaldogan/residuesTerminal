@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>THE ENGINE — residuesTerminal</title>
+<meta name="description" content="A sophisticated three-column terminal-based simulation for THE ENGINE project, featuring amber-on-black CRT aesthetics.">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+
+  :root {
+    --amber:        #FFB000;
+    --amber-bright: #FFD566;
+    --amber-dim:    #99680A;
+    --amber-ghost:  #4A3205;
+    --amber-faint:  #2A1E05;
+    --amber-glow:   rgba(255, 176, 0, 0.08);
+    --bg:           #0A0800;
+    --bg-panel:     #0D0B02;
+    --bg-deep:      #060500;
+    --border:       #5C4400;
+    --border-bright:#8A6A10;
+    --critical:     #FF6633;
+    --scanline:     rgba(0, 0, 0, 0.12);
+  }
+
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--amber);
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 11.5px;
+    line-height: 1.45;
+    -webkit-font-smoothing: none;
+    -moz-osx-font-smoothing: unset;
+  }
+
+  /* ── CRT CONTAINER ── */
+  #crt-wrapper {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Scanline overlay */
+  #crt-wrapper::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 2px,
+      var(--scanline) 2px,
+      var(--scanline) 4px
+    );
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  /* Vignette */
+  #crt-wrapper::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: radial-gradient(
+      ellipse at center,
+      transparent 55%,
+      rgba(0,0,0,0.45) 100%
+    );
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  /* Phosphor glow layer */
+  .phosphor-glow {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: radial-gradient(
+      ellipse at 50% 40%,
+      rgba(255, 176, 0, 0.03) 0%,
+      transparent 70%
+    );
+    pointer-events: none;
+    z-index: 998;
+  }
+
+  /* ── TOP BAR ── */
+  #top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 12px;
+    background: var(--bg-deep);
+    border-bottom: 1px solid var(--border);
+    min-height: 22px;
+    flex-shrink: 0;
+    z-index: 2;
+  }
+
+  #top-bar .left { color: var(--amber-dim); font-size: 10px; letter-spacing: 1px; }
+  #top-bar .center { color: var(--amber-bright); font-weight: 700; font-size: 11px; letter-spacing: 3px; text-transform: uppercase; }
+  #top-bar .right { color: var(--amber-dim); font-size: 10px; letter-spacing: 1px; }
+  #top-bar .icon { margin: 0 4px; opacity: 0.7; }
+
+  /* ── MAIN 3-COLUMN LAYOUT ── */
+  #main-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr 1fr;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    background: var(--bg-panel);
+  }
+
+  /* Double-line ASCII borders via CSS */
+  .panel-border {
+    border: 1px solid var(--border);
+    margin: 2px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex: 1;
+  }
+
+  .panel-border::before {
+    content: '';
+    position: absolute;
+    top: 1px; left: 1px;
+    right: 1px; bottom: 1px;
+    border: 1px solid var(--amber-ghost);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .panel-header {
+    padding: 3px 10px;
+    background: var(--bg-deep);
+    border-bottom: 1px solid var(--border);
+    color: var(--amber-bright);
+    font-weight: 700;
+    font-size: 10.5px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .panel-header .tag {
+    color: var(--amber-dim);
+    font-weight: 400;
+    font-size: 9.5px;
+    letter-spacing: 1px;
+  }
+
+  .panel-content {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 6px 8px;
+    position: relative;
+    scrollbar-width: none;
+  }
+  .panel-content::-webkit-scrollbar { display: none; }
+
+  /* ── COLUMN 1: THE MIND ── */
+  .log-entry {
+    margin-bottom: 4px;
+    line-height: 1.5;
+  }
+  .log-entry .timestamp {
+    color: var(--amber-dim);
+    font-weight: 300;
+    font-size: 10px;
+  }
+  .log-entry .source {
+    color: var(--amber-bright);
+    font-weight: 700;
+  }
+  .log-entry .text {
+    color: var(--amber);
+    font-weight: 400;
+  }
+  .log-entry .dim {
+    color: var(--amber-ghost);
+    font-weight: 300;
+  }
+  .log-entry.critical .text {
+    color: var(--critical);
+    font-weight: 700;
+  }
+  .log-entry .tree {
+    color: var(--amber-dim);
+    font-weight: 300;
+    font-size: 10.5px;
+    padding-left: 14px;
+    display: block;
+  }
+  .log-entry .tree-last {
+    color: var(--amber-dim);
+    font-weight: 300;
+    font-size: 10.5px;
+    padding-left: 14px;
+    display: block;
+  }
+  .status-line {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    padding: 4px 10px;
+    background: var(--bg-deep);
+    border-top: 1px solid var(--border);
+    color: var(--amber-dim);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .status-line .blink {
+    animation: blink-slow 1.8s step-end infinite;
+  }
+
+  /* ── COLUMN 2: THE LOOM ── */
+  .loom-bg {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    color: var(--amber-faint);
+    font-size: 10.5px;
+    line-height: 1.45;
+    white-space: pre;
+    overflow: hidden;
+    z-index: 0;
+    padding: 6px;
+    opacity: 0.4;
+  }
+
+  .loom-section {
+    position: relative;
+    z-index: 1;
+    margin-bottom: 10px;
+  }
+
+  .loom-section .section-title {
+    color: var(--amber-bright);
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--amber-ghost);
+    padding-bottom: 2px;
+  }
+
+  .matrix-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    font-size: 10.5px;
+    line-height: 1.6;
+  }
+  .matrix-row .addr {
+    color: var(--amber-dim);
+    width: 38px;
+    text-align: right;
+    padding-right: 6px;
+    font-weight: 300;
+    flex-shrink: 0;
+  }
+  .matrix-row .bits {
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    flex: 1;
+  }
+  .matrix-row .bits .on {
+    color: var(--amber-bright);
+  }
+  .matrix-row .bits .off {
+    color: var(--amber-ghost);
+  }
+  .matrix-row .hex {
+    color: var(--amber-dim);
+    font-weight: 300;
+    width: 48px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .pattern-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    font-size: 11px;
+    line-height: 1.7;
+  }
+  .pattern-row .idx {
+    color: var(--amber-dim);
+    width: 24px;
+    text-align: right;
+    padding-right: 4px;
+    font-weight: 300;
+    flex-shrink: 0;
+  }
+  .pattern-row .pat {
+    flex: 1;
+    font-weight: 500;
+    letter-spacing: 1px;
+  }
+  .pattern-row .pat .fill {
+    color: var(--amber-bright);
+  }
+  .pattern-row .pat .hole {
+    color: var(--amber-ghost);
+  }
+  .pattern-row .phex {
+    color: var(--amber-dim);
+    font-weight: 300;
+    width: 48px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .register-bar {
+    display: flex;
+    gap: 16px;
+    padding: 6px 4px;
+    border-top: 1px solid var(--amber-ghost);
+    margin-top: 8px;
+    font-size: 10px;
+    color: var(--amber-dim);
+    letter-spacing: 1px;
+  }
+  .register-bar .reg-val {
+    color: var(--amber);
+    font-weight: 500;
+  }
+
+  /* ── COLUMN 3: CARD STACK ── */
+  .card-stack {
+    position: relative;
+    margin: 4px auto;
+    width: 90%;
+  }
+
+  .punched-card {
+    position: relative;
+    border: 1px solid var(--border);
+    background: var(--bg-deep);
+    margin-bottom: -6px;
+    padding: 4px 8px;
+    font-size: 10px;
+    transition: all 0.3s;
+  }
+
+  .punched-card.active {
+    border-color: var(--amber-dim);
+    background: var(--bg-panel);
+    z-index: 5;
+    margin-bottom: 2px;
+    box-shadow: 0 0 12px rgba(255, 176, 0, 0.06);
+  }
+
+  .punched-card .card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--amber-ghost);
+    padding-bottom: 2px;
+    margin-bottom: 3px;
+  }
+  .punched-card .card-top .label {
+    color: var(--amber-bright);
+    font-weight: 700;
+    font-size: 9.5px;
+    letter-spacing: 1.5px;
+  }
+  .punched-card .card-top .status {
+    color: var(--amber-dim);
+    font-size: 8.5px;
+    letter-spacing: 1px;
+  }
+
+  .card-holes {
+    display: flex;
+    gap: 3px;
+    justify-content: center;
+    padding: 4px 0;
+    font-size: 12px;
+    letter-spacing: 2px;
+  }
+  .card-holes .punched {
+    color: var(--amber-bright);
+    text-shadow: 0 0 4px rgba(255, 176, 0, 0.3);
+  }
+  .card-holes .solid {
+    color: var(--amber-ghost);
+  }
+
+  .card-id {
+    text-align: center;
+    color: var(--amber-dim);
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 1px 0;
+  }
+
+  .card-shadow {
+    position: relative;
+    border: 1px solid var(--amber-ghost);
+    background: var(--bg-deep);
+    height: 16px;
+    margin-bottom: -10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.5;
+  }
+  .card-shadow:nth-child(2) { margin-left: 4px; margin-right: -4px; opacity: 0.4; }
+  .card-shadow:nth-child(3) { margin-left: 8px; margin-right: -8px; opacity: 0.3; }
+  .card-shadow:nth-child(4) { margin-left: 12px; margin-right: -12px; opacity: 0.2; }
+  .card-shadow .shadow-label {
+    color: var(--amber-ghost);
+    font-size: 8px;
+    letter-spacing: 1px;
+  }
+
+  .docs-block {
+    margin-top: 14px;
+    padding: 8px;
+    border: 1px solid var(--amber-ghost);
+    background: var(--bg-deep);
+    font-size: 10px;
+    line-height: 1.6;
+  }
+  .docs-block .doc-label {
+    color: var(--amber-dim);
+    font-weight: 300;
+    letter-spacing: 1px;
+  }
+  .docs-block .doc-text {
+    color: var(--amber);
+    font-style: italic;
+  }
+  .docs-block .signature {
+    color: var(--amber-dim);
+    font-weight: 300;
+    letter-spacing: 0.5px;
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .docs-block .sig-glyph {
+    color: var(--amber-ghost);
+    font-size: 11px;
+    letter-spacing: 2px;
+    font-weight: 500;
+  }
+
+  /* ── BOTTOM SHELL ── */
+  #bottom-shell {
+    display: flex;
+    align-items: center;
+    padding: 4px 12px;
+    background: var(--bg-deep);
+    border-top: 1px solid var(--border);
+    min-height: 26px;
+    flex-shrink: 0;
+    z-index: 2;
+    font-size: 11px;
+  }
+
+  #bottom-shell .prompt {
+    color: var(--amber-bright);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  #bottom-shell .cmd {
+    color: var(--amber);
+    font-weight: 400;
+    margin-left: 4px;
+    letter-spacing: 0.5px;
+  }
+  #bottom-shell .cursor-block {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--amber);
+    animation: blink-cursor 1s step-end infinite;
+    vertical-align: middle;
+    margin-left: 1px;
+  }
+
+  /* ── ANIMATIONS ── */
+  @keyframes blink-cursor {
+    0%, 49%  { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+  @keyframes blink-slow {
+    0%, 69%  { opacity: 1; }
+    70%, 100% { opacity: 0.3; }
+  }
+  @keyframes pulse-glow {
+    0%, 100% { text-shadow: 0 0 4px rgba(255,176,0,0.2); }
+    50%      { text-shadow: 0 0 10px rgba(255,176,0,0.5); }
+  }
+  @keyframes flicker {
+    0%   { opacity: 0.97; }
+    5%   { opacity: 1; }
+    10%  { opacity: 0.98; }
+    15%  { opacity: 1; }
+    50%  { opacity: 0.99; }
+    55%  { opacity: 0.96; }
+    60%  { opacity: 1; }
+    100% { opacity: 0.98; }
+  }
+
+  #crt-wrapper {
+    animation: flicker 4s infinite linear;
+  }
+
+  /* Typewriter effect on log entries */
+  .log-entry { animation: fadeIn 0.3s ease-out; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Column 2 active row highlight */
+  .matrix-row.active-row {
+    background: rgba(255, 176, 0, 0.04);
+  }
+  .matrix-row.active-row .addr {
+    color: var(--amber-bright);
+  }
+
+  /* Hover micro-effects */
+  .punched-card:hover {
+    border-color: var(--amber-dim);
+    box-shadow: 0 0 8px rgba(255, 176, 0, 0.08);
+  }
+
+  /* Pulsing active indicator */
+  .active-indicator {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--amber);
+    animation: pulse-glow 2s ease-in-out infinite;
+    margin-right: 6px;
+    box-shadow: 0 0 6px rgba(255, 176, 0, 0.4);
+  }
+
+  /* Responsive adjustments */
+  @media (max-width: 1100px) {
+    html, body { font-size: 10px; }
+    #main-grid { grid-template-columns: 1fr 0.8fr 0.9fr; }
+  }
+  @media (max-width: 800px) {
+    html, body { font-size: 9px; }
+    #main-grid { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr 1fr; }
+  }
+
+  /* Active card hole row animations */
+  .hole-row {
+    position: relative;
+  }
+  .hole-row::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 10%; right: 10%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--amber-ghost), transparent);
+  }
+
+  /* Matrix header */
+  .matrix-header {
+    display: flex;
+    font-size: 9px;
+    color: var(--amber-ghost);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+    padding-bottom: 2px;
+    border-bottom: 1px dashed var(--amber-faint);
+  }
+  .matrix-header .h-addr { width: 38px; text-align: right; padding-right: 6px; }
+  .matrix-header .h-data { flex: 1; }
+  .matrix-header .h-hex { width: 48px; text-align: right; }
+</style>
+</head>
+<body>
+
+<div id="crt-wrapper">
+  <div class="phosphor-glow"></div>
+
+  <!-- ═══ TOP BAR ═══ -->
+  <div id="top-bar">
+    <div class="left">
+      <span class="icon">◈</span>
+      <span id="date-display">17 JUN 2026</span>
+      <span class="icon">│</span>
+      <span>ACT I</span>
+    </div>
+    <div class="center">▐ THE ENGINE ▌</div>
+    <div class="right">
+      <span id="time-display">22:56:06</span>
+      <span class="icon">│</span>
+      <span class="icon">♦</span>
+      <span>MEM: 4096K</span>
+      <span class="icon">│</span>
+      <span class="icon">◆</span>
+      <span>AUDIO: ON</span>
+      <span class="icon">│</span>
+      <span>◇</span>
+    </div>
+  </div>
+
+  <!-- ═══ MAIN 3-COLUMN GRID ═══ -->
+  <div id="main-grid">
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- COLUMN 1: LOG / THE MIND                      -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="panel" id="panel-mind">
+      <div class="panel-border">
+        <div class="panel-header">
+          <span>[01] LOG / THE MIND</span>
+          <span class="tag">JACQUARD 1804</span>
+        </div>
+        <div class="panel-content" id="mind-log">
+
+          <div class="log-entry">
+            <span class="timestamp">[00:41:58]</span>
+            <span class="source"> SYSTEM:</span>
+            <span class="dim"> Boot sequence complete. Core memory: stable.</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:02]</span>
+            <span class="source"> SYSTEM:</span>
+            <span class="dim"> Thread pool initialized. Worker count: 4.</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:05]</span>
+            <span class="source"> TURING_MIND:</span>
+            <span class="text"> "The rhythm of the looms echoes from Lyon..."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:08]</span>
+            <span class="source"> TURING_MIND:</span>
+            <span class="text"> "A continuous roll of perforated paper. Primitive.</span>
+            <br>
+            <span class="text" style="padding-left:14px;">But from the holes, the pattern breathes."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:11]</span>
+            <span class="source"> TURING_MIND:</span>
+            <span class="text"> "A continuous roll... go on then. Finish the damask."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:15]</span>
+            <span class="source"> SYSTEM STATE:</span>
+            <span class="tree">├─ Metronome: 70 BPM</span>
+            <span class="tree">├─ Tension:   ■■■░░░░░░ 34%</span>
+            <span class="tree-last">└─ Chain:     JAMMED</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:17]</span>
+            <span class="source"> ENGINE:</span>
+            <span class="dim"> Card feed mechanism recalibrated. Falcon blocks ejected.</span>
+          </div>
+
+          <div class="log-entry critical">
+            <span class="timestamp">[00:42:19]</span>
+            <span class="text"> [CRITICAL]: "Find the shortest run of cards that can cycle forever."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:22]</span>
+            <span class="source"> JACQUARD:</span>
+            <span class="text"> "A paper roll? A child's toy. Torn after two</span>
+            <br>
+            <span class="text" style="padding-left:14px;">metres — you've ruined the silk."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:26]</span>
+            <span class="source"> SYSTEM:</span>
+            <span class="dim"> State transition: ROLL → CHAIN → CARD. Current: CARD.</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:30]</span>
+            <span class="source"> ENGINE:</span>
+            <span class="dim"> Punched card reader engaged. Awaiting card program...</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:33]</span>
+            <span class="source"> TURING_MIND:</span>
+            <span class="text"> "Two cards. Period-2 symmetry. The motif repeats."</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:36]</span>
+            <span class="source"> SYSTEM STATE:</span>
+            <span class="tree">├─ Cards loaded:  2/4</span>
+            <span class="tree">├─ Target rows:   4</span>
+            <span class="tree">├─ Loop period:   2</span>
+            <span class="tree-last">└─ Verification:  PENDING</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:40]</span>
+            <span class="source"> CANDLE:</span>
+            <span class="dim"> ▏▎▍▌▋█ rows remaining: 847</span>
+          </div>
+
+          <div class="log-entry">
+            <span class="timestamp">[00:42:42]</span>
+            <span class="source"> TURING_MIND:</span>
+            <span class="text"> "Separate the instruction from the mechanism."</span>
+          </div>
+
+          <!-- Spacer for status line -->
+          <div style="height: 24px;"></div>
+        </div>
+        <div class="status-line">
+          <span class="blink">●</span> STATUS: Awaiting cycle... <span style="float:right; color:var(--amber-ghost);">▏THREAD: 0x04</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- COLUMN 2: THE LOOM (MATRICES)                 -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="panel" id="panel-loom">
+      <div class="panel-border">
+        <div class="panel-header">
+          <span>[02] THE LOOM</span>
+          <span class="tag">MATRICES</span>
+        </div>
+        <div class="panel-content">
+
+          <!-- Background grid texture -->
+          <div class="loom-bg" id="loom-grid-bg"></div>
+
+          <!-- CORE INSTRUCTION REGISTER -->
+          <div class="loom-section">
+            <div class="section-title">CORE INSTRUCTION REGISTER</div>
+
+            <div class="matrix-header">
+              <span class="h-addr">ADDR</span>
+              <span class="h-data">DATA [7 · · · · · · 0]</span>
+              <span class="h-hex">HEX</span>
+            </div>
+
+            <div class="matrix-row active-row">
+              <span class="addr">0x00</span>
+              <span class="bits"><span class="on">████</span> <span class="off">░░░░</span> <span class="off">░░░░</span> <span class="off">░░░░</span></span>
+              <span class="hex">[0x80]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x01</span>
+              <span class="bits"><span class="off">░░░░</span> <span class="on">████</span> <span class="off">░░░░</span> <span class="off">░░░░</span></span>
+              <span class="hex">[0x40]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x02</span>
+              <span class="bits"><span class="on">████</span> <span class="off">░░░░</span> <span class="on">████</span> <span class="off">░░░░</span></span>
+              <span class="hex">[0xA0]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x03</span>
+              <span class="bits"><span class="off">░░░░</span> <span class="on">████</span> <span class="off">░░░░</span> <span class="on">████</span></span>
+              <span class="hex">[0x50]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x04</span>
+              <span class="bits"><span class="on">██</span><span class="off">░░</span><span class="on">██</span><span class="off">░░</span><span class="on">██</span><span class="off">░░</span><span class="on">██</span><span class="off">░░</span></span>
+              <span class="hex">[0xAA]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x05</span>
+              <span class="bits"><span class="off">░░</span><span class="on">██</span><span class="off">░░</span><span class="on">██</span><span class="off">░░</span><span class="on">██</span><span class="off">░░</span><span class="on">██</span></span>
+              <span class="hex">[0x55]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x06</span>
+              <span class="bits"><span class="on">████</span> <span class="on">████</span> <span class="off">░░░░</span> <span class="off">░░░░</span></span>
+              <span class="hex">[0xC0]</span>
+            </div>
+            <div class="matrix-row">
+              <span class="addr">0x07</span>
+              <span class="bits"><span class="on">████</span> <span class="on">████</span> <span class="on">████</span> <span class="on">████</span></span>
+              <span class="hex">[0xFF]</span>
+            </div>
+          </div>
+
+          <!-- TARGET DAMASK WEAVE -->
+          <div class="loom-section">
+            <div class="section-title">TARGET DAMASK WEAVE</div>
+
+            <div class="matrix-header">
+              <span class="h-addr">LINE</span>
+              <span class="h-data">PATTERN</span>
+              <span class="h-hex">HEX</span>
+            </div>
+
+            <div class="pattern-row">
+              <span class="idx">0:</span>
+              <span class="pat"><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span></span>
+              <span class="phex">[0xAA]</span>
+            </div>
+            <div class="pattern-row">
+              <span class="idx">1:</span>
+              <span class="pat"><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span></span>
+              <span class="phex">[0x55]</span>
+            </div>
+            <div class="pattern-row">
+              <span class="idx">2:</span>
+              <span class="pat"><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span></span>
+              <span class="phex">[0xAA]</span>
+            </div>
+            <div class="pattern-row">
+              <span class="idx">3:</span>
+              <span class="pat"><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span><span class="fill">█</span><span class="hole">░</span></span>
+              <span class="phex">[0x55]</span>
+            </div>
+          </div>
+
+          <!-- WEAVE VERIFICATION -->
+          <div class="loom-section">
+            <div class="section-title">WEAVE VERIFICATION</div>
+            <div style="font-size:10px; color:var(--amber-dim); line-height:1.6;">
+              <span style="color:var(--amber-ghost)">CARD[0] → ROW[0]:</span> <span style="color:var(--amber)">0xAA</span> == <span style="color:var(--amber)">0xAA</span> <span style="color:#66BB6A">✓</span><br>
+              <span style="color:var(--amber-ghost)">CARD[1] → ROW[1]:</span> <span style="color:var(--amber)">0x55</span> == <span style="color:var(--amber)">0x55</span> <span style="color:#66BB6A">✓</span><br>
+              <span style="color:var(--amber-ghost)">CARD[0] → ROW[2]:</span> <span style="color:var(--amber)">0xAA</span> == <span style="color:var(--amber)">0xAA</span> <span style="color:#66BB6A">✓</span><br>
+              <span style="color:var(--amber-ghost)">CARD[1] → ROW[3]:</span> <span style="color:var(--amber)">0x55</span> == <span style="color:var(--amber)">0x55</span> <span style="color:#66BB6A">✓</span>
+            </div>
+          </div>
+
+          <!-- Register status bar -->
+          <div class="register-bar">
+            <span>FEED_PTR: <span class="reg-val">[0x03]</span></span>
+            <span>MASK_REG: <span class="reg-val">[0xFF]</span></span>
+            <span>LOOP: <span class="reg-val">[2]</span></span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- COLUMN 3: ARCHIVE / CARD STACK                -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="panel" id="panel-archive">
+      <div class="panel-border">
+        <div class="panel-header">
+          <span>[03] ARCHIVE / CARD STACK</span>
+          <span class="tag">JACQUARD DOSSIER</span>
+        </div>
+        <div class="panel-content">
+
+          <div class="card-stack">
+
+            <!-- Top card (ACTIVE) -->
+            <div class="punched-card active">
+              <div class="card-top">
+                <span class="label"><span class="active-indicator"></span>CARD [ACTIVE]</span>
+                <span class="status">LOADED</span>
+              </div>
+              <pre style="color:var(--amber); font-size:10px; text-align:center; margin:2px 0; line-height:1.3;">┌─────────────────────────────────────┐
+│  ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ │
+│  ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ │
+│  ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ │
+│  ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ │
+│             ID: #1804-A1            │
+└─────────────────────────────────────┘</pre>
+            </div>
+
+            <!-- Card 2 -->
+            <div class="punched-card">
+              <div class="card-top">
+                <span class="label">CARD #2</span>
+                <span class="status">QUEUED</span>
+              </div>
+              <pre style="color:var(--amber-dim); font-size:10px; text-align:center; margin:2px 0; line-height:1.3;">┌─────────────────────────────────────┐
+│  ▀ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ │
+│  ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ ░ ▄ ░ ▀ │
+│             ID: #1804-A2            │
+└─────────────────────────────────────┘</pre>
+            </div>
+
+            <!-- Shadow cards (depth) -->
+            <div class="card-shadow" style="margin-left:4px;">
+              <span class="shadow-label">[ID: #1804-A3]</span>
+            </div>
+            <div class="card-shadow" style="margin-left:8px;">
+              <span class="shadow-label">[ID: #1804-A4]</span>
+            </div>
+            <div class="card-shadow" style="margin-left:12px;">
+              <span class="shadow-label">[ID: #1804-A5]</span>
+            </div>
+
+          </div>
+
+          <!-- Documentation block -->
+          <div class="docs-block">
+            <span class="doc-label">DOCS:</span>
+            <span class="doc-text"> "Separate the instruction from the loom.</span>
+            <br>
+            <span class="doc-text" style="padding-left:40px;">The pattern must live on card."</span>
+            <div class="signature">
+              <span class="doc-label">HAND-SIGNED:</span>
+              <span style="color:var(--amber);">J.M. Jacquard</span>
+              <span class="sig-glyph">šžćžžšžć</span>
+            </div>
+            <div style="margin-top:8px; border-top:1px dashed var(--amber-ghost); padding-top:6px;">
+              <span class="doc-label">EPOCH:</span>
+              <span style="color:var(--amber-dim);"> Lyon, 1804</span>
+              <br>
+              <span class="doc-label">CLASS:</span>
+              <span style="color:var(--amber-dim);"> Programmable textile automation</span>
+              <br>
+              <span class="doc-label">MEDIUM:</span>
+              <span style="color:var(--amber-dim);"> Punched card (rigid, modular)</span>
+            </div>
+          </div>
+
+          <!-- Archive status -->
+          <div style="margin-top:10px; padding:5px 8px; border:1px solid var(--amber-ghost); font-size:9.5px; color:var(--amber-ghost); letter-spacing:1px;">
+            <span style="color:var(--amber-dim);">ARCHIVE MANIFEST</span><br>
+            ├─ ACT I:   Jacquard (1804) <span style="color:var(--amber);">[ACTIVE]</span><br>
+            ├─ ACT II:  Babbage  (1837) <span style="color:var(--amber-ghost);">[LOCKED]</span><br>
+            ├─ ACT III: Lovelace (1843) <span style="color:var(--amber-ghost);">[LOCKED]</span><br>
+            ├─ ACT IV:  Boole    (1854) <span style="color:var(--amber-ghost);">[LOCKED]</span><br>
+            ├─ ACT V:   Shannon  (1937) <span style="color:var(--amber-ghost);">[LOCKED]</span><br>
+            └─ ACT VI:  Turing   (1936) <span style="color:var(--amber-ghost);">[LOCKED]</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══ BOTTOM SHELL ═══ -->
+  <div id="bottom-shell">
+    <span class="prompt">residues@terminal:~/$</span>
+    <span class="cmd"> step --cards=0x01 --target=0xAA</span>
+    <span class="cursor-block"></span>
+  </div>
+
+</div>
+
+<script>
+  // ── Live clock ──
+  function updateClock() {
+    const now = new Date();
+    const h = String(now.getHours()).padStart(2, '0');
+    const m = String(now.getMinutes()).padStart(2, '0');
+    const s = String(now.getSeconds()).padStart(2, '0');
+    document.getElementById('time-display').textContent = `${h}:${m}:${s}`;
+
+    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const day = String(now.getDate()).padStart(2, '0');
+    const mon = months[now.getMonth()];
+    const year = now.getFullYear();
+    document.getElementById('date-display').textContent = `${day} ${mon} ${year}`;
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // ── Generate background grid for Column 2 ──
+  function generateGrid() {
+    const el = document.getElementById('loom-grid-bg');
+    if (!el) return;
+    const cols = 50;
+    const rows = 60;
+    let grid = '';
+    for (let r = 0; r < rows; r++) {
+      let line = '';
+      for (let c = 0; c < cols; c++) {
+        if (r % 3 === 0 && c % 5 === 0) {
+          line += '+';
+        } else if (r % 3 === 0 || c % 5 === 0) {
+          line += '·';
+        } else {
+          line += '.';
+        }
+      }
+      grid += line + '\n';
+    }
+    el.textContent = grid;
+  }
+  generateGrid();
+
+  // ── Auto-scroll mind log to bottom ──
+  const mindLog = document.getElementById('mind-log');
+  if (mindLog) {
+    mindLog.scrollTop = mindLog.scrollHeight;
+  }
+
+  // ── Simulate new log entries periodically ──
+  const logMessages = [
+    { src: 'SYSTEM', text: 'Heartbeat sync: 70 BPM. Drift: ±0.02ms.', cls: 'dim' },
+    { src: 'ENGINE', text: 'Card reader shuttle: nominal. Feed rate: 12 cards/s.', cls: 'dim' },
+    { src: 'TURING_MIND', text: '"The holes are binary. Hole or no hole. True or false."', cls: 'text' },
+    { src: 'SYSTEM', text: 'Candle: ▏▎▍▌▋█ rows remaining: 842', cls: 'dim' },
+    { src: 'ENGINE', text: 'Weave verification pass 4/4: MATCH.', cls: 'dim' },
+    { src: 'TURING_MIND', text: '"Pattern period detected. Compressing..."', cls: 'text' },
+    { src: 'SYSTEM', text: 'Audio thread: metronome drift correction applied.', cls: 'dim' },
+    { src: 'JACQUARD', text: '"Stronger. Separate cards, fed in sequence."', cls: 'text' },
+  ];
+  let logIdx = 0;
+
+  function addLogEntry() {
+    const msg = logMessages[logIdx % logMessages.length];
+    logIdx++;
+
+    const now = new Date();
+    const h = String(now.getHours()).padStart(2, '0');
+    const m = String(now.getMinutes()).padStart(2, '0');
+    const s = String(now.getSeconds()).padStart(2, '0');
+
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="timestamp">[${h}:${m}:${s}]</span> <span class="source">${msg.src}:</span> <span class="${msg.cls}">${msg.text}</span>`;
+
+    const statusLine = document.querySelector('.status-line');
+    const spacer = mindLog.querySelector('div[style*="height: 24px"]');
+    if (spacer) {
+      mindLog.insertBefore(entry, spacer);
+    } else {
+      mindLog.appendChild(entry);
+    }
+    mindLog.scrollTop = mindLog.scrollHeight;
+  }
+
+  setInterval(addLogEntry, 5500);
+
+  // ── Subtle FEED_PTR animation ──
+  let feedPtr = 3;
+  setInterval(() => {
+    feedPtr = (feedPtr + 1) % 8;
+    const regBar = document.querySelector('.register-bar');
+    if (regBar) {
+      const spans = regBar.querySelectorAll('.reg-val');
+      if (spans[0]) spans[0].textContent = `[0x0${feedPtr.toString(16).toUpperCase()}]`;
+    }
+  }, 3000);
+</script>
+
+</body>
+</html>

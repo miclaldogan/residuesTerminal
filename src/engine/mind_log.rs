@@ -39,6 +39,34 @@ fn corrupt_string(s: &str, ppm: f32, seed: u64) -> String {
     }).collect()
 }
 
+/// Mechanical gear-alignment text error: swap `level` adjacent character pairs inside
+/// a string (e.g. "this is" → "tihs si"). Spaces are skipped so word boundaries hold
+/// and the line stays a recognisable-but-misaligned echo of itself. Deterministic in
+/// `seed`, so a given stage renders the same glitch every frame instead of shimmering.
+fn gear_glitch(s: &str, level: usize, seed: u64) -> String {
+    if level == 0 {
+        return s.to_string();
+    }
+    let mut chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    if n < 2 {
+        return s.to_string();
+    }
+    let mut rng = Lcg::new(seed);
+    let swaps = level.min(n / 2).max(1);
+    for _ in 0..swaps {
+        let start = (rng.next() as usize) % (n - 1);
+        for k in 0..(n - 1) {
+            let i = (start + k) % (n - 1);
+            if chars[i] != ' ' && chars[i + 1] != ' ' {
+                chars.swap(i, i + 1);
+                break;
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
+
 const COURT_RECORDS: &[&str] = &[
     "REGISTRY: Regina v. Turing (1952). Gross indecency trial Section 11...",
     "COURT ORDER: To submit to organo-therapy treatments of estrogen...",
@@ -80,6 +108,8 @@ pub enum VoiceCue {
     JacquardJam,
     BabbageCrunch,
     Blunder,
+    /// A heavy interrogation-room bootstep, fired per court-record fragment (Act IV).
+    PoliceBootstep,
     Victory(Act),
 }
 
@@ -105,6 +135,7 @@ impl VoiceCue {
             VoiceCue::JacquardJam => "VO_JACQUARD_JAM",
             VoiceCue::BabbageCrunch => "VO_BABBAGE_CRUNCH",
             VoiceCue::Blunder => "VO_BLUNDER_TAUNT",
+            VoiceCue::PoliceBootstep => "SFX_POLICE_BOOTSTEP",
             VoiceCue::Victory(_) => "VO_ACT_VICTORY",
         }
     }
@@ -271,6 +302,9 @@ pub struct DialogueEngine {
     pending_cue: Option<VoiceCue>,
     active: bool,
     done: bool,
+    /// Completed lines, oldest first — the descending narrative scrollback that the
+    /// mind log renders above the line currently being typed.
+    history: Vec<(Speaker, String)>,
 }
 
 impl DialogueEngine {
@@ -286,10 +320,23 @@ impl DialogueEngine {
             pending_cue: None,
             active: false,
             done: false,
+            history: Vec::new(),
         }
     }
 
     fn start(&mut self, speaker: Speaker, atoms: Vec<Atom>, cue: Option<VoiceCue>, target_frames: Option<u32>) {
+        // Retire the previous line into the scrollback before the new one begins,
+        // so the narrative stream accumulates top-to-bottom instead of replacing.
+        if self.active && !self.displayed.is_empty() {
+            let prev: String = self.displayed.iter().collect();
+            self.history.push((self.speaker, prev));
+            const MAX_HISTORY: usize = 80;
+            if self.history.len() > MAX_HISTORY {
+                let overflow = self.history.len() - MAX_HISTORY;
+                self.history.drain(0..overflow);
+            }
+        }
+
         let nominal: u32 = atoms.iter().map(|a| atom_base(a) as u32).sum::<u32>().max(1);
         self.scale = match target_frames {
             Some(t) if t > 0 => (t as f32 / nominal as f32).clamp(0.3, 8.0),
@@ -407,16 +454,109 @@ impl DialogueEngine {
     pub fn visible(&self) -> String {
         self.displayed.iter().collect()
     }
+
+    /// The retired-line scrollback (oldest first) for the descending narrative stream.
+    pub fn history(&self) -> &[(Speaker, String)] {
+        &self.history
+    }
 }
 
 fn speaker_color(speaker: Speaker) -> Color {
     match speaker {
-        Speaker::Turing => Color::Rgb(214, 196, 158),
-        Speaker::MindLog => Color::Rgb(120, 205, 165),
-        Speaker::System => Color::Rgb(150, 150, 160),
+        Speaker::Turing => Color::Rgb(255, 176, 0),
+        Speaker::MindLog => Color::Rgb(153, 104, 10),
+        Speaker::System => Color::Rgb(100, 78, 20),
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Mind-log rendering helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write a string at (x, y), clipped to the buffer, with explicit fg/bg.
+fn put_line(buf: &mut Buffer, x: u16, y: u16, s: &str, fg: Color, bg: Color) {
+    let Rect { x: ax, y: ay, width: aw, height: ah } = *buf.area();
+    let mut col = x;
+    for ch in s.chars() {
+        if col >= ax + aw { break; }
+        if col >= ax && y >= ay && y < ay + ah {
+            let cell = buf.get_mut(col, y);
+            cell.set_char(ch);
+            cell.fg = fg;
+            cell.bg = bg;
+        }
+        col = col.saturating_add(1);
+    }
+}
+
+/// Draw a single-line box border around `area` with an inset title on the top edge.
+fn draw_panel_border(buf: &mut Buffer, area: Rect, title: &str, bg: Color, border: Color, title_c: Color) {
+    if area.width < 2 || area.height < 2 { return; }
+    let x0 = area.x;
+    let y0 = area.y;
+    let x1 = area.x + area.width - 1;
+    let y1 = area.y + area.height - 1;
+    put_line(buf, x0, y0, "┌", border, bg);
+    put_line(buf, x1, y0, "┐", border, bg);
+    put_line(buf, x0, y1, "└", border, bg);
+    put_line(buf, x1, y1, "┘", border, bg);
+    for i in 1..area.width - 1 {
+        put_line(buf, x0 + i, y0, "─", border, bg);
+        put_line(buf, x0 + i, y1, "─", border, bg);
+    }
+    for j in 1..area.height - 1 {
+        put_line(buf, x0, y0 + j, "│", border, bg);
+        put_line(buf, x1, y0 + j, "│", border, bg);
+    }
+    put_line(buf, x0 + 2, y0, title, title_c, bg);
+}
+
+/// Wrap a string into lines no wider than `max_w`, breaking on spaces (left-aligned).
+/// A word that is itself wider than `max_w` is *hard-broken* into `max_w`-wide chunks,
+/// so a single long token (or post-corruption run) can never overflow the panel and
+/// bleed into the neighbouring centre column. Every returned line is guaranteed
+/// `≤ max_w` characters.
+fn wrap_stream(text: &str, max_w: usize) -> Vec<String> {
+    let max_w = max_w.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        let wlen = word.chars().count();
+        // Hard-break an oversize word into width-bounded chunks.
+        if wlen > max_w {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let chars: Vec<char> = word.chars().collect();
+            let mut i = 0;
+            while chars.len() - i > max_w {
+                lines.push(chars[i..i + max_w].iter().collect());
+                i += max_w;
+            }
+            cur = chars[i..].iter().collect(); // remainder seeds the next line
+            continue;
+        }
+        if cur.is_empty() {
+            cur.push_str(word);
+        } else if cur.chars().count() + 1 + wlen <= max_w {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    lines.push(cur);
+    lines
+}
+
+/// Render the left column [NARRATIVE LOG · THE MIND] as a clean, bordered, top-to-
+/// bottom descending text stream. Completed dialogue scrolls up out of the engine's
+/// history while the live line types at the bottom. There is no telemetry, no vitals
+/// and no inline heartbeat here any more — those now live in the bottom telemetry bar.
 pub fn render_mind_log(
     f: &mut Frame,
     area: Rect,
@@ -424,202 +564,99 @@ pub fn render_mind_log(
     dialogue: &DialogueEngine,
 ) {
     let buf = f.buffer_mut();
-    
-    // Draw background
-    let bg = Color::Rgb(10, 10, 10);
+    if area.width < 6 || area.height < 4 {
+        return;
+    }
+
+    let bg = Color::Rgb(10, 8, 0);
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
             let cell = buf.get_mut(x, y);
             cell.set_char(' ');
-            cell.set_style(Style::default().bg(bg));
+            cell.set_style(Style::default().fg(bg).bg(bg));
         }
     }
-    
-    // Draw border
-    let border_style = Style::default().fg(Color::Rgb(80, 80, 80)).bg(bg);
-    let title_style = Style::default().fg(Color::Rgb(160, 160, 160)).bg(bg);
-    
-    // Draw top line
-    let title = " LOG / THE MIND ";
-    let mut x = area.x;
-    if area.width > 2 {
-        buf.get_mut(x, area.y).set_char('┌');
-        buf.get_mut(x, area.y).set_style(border_style);
-        x += 1;
-        
-        // Print title
-        let mut title_chars = title.chars();
-        for _ in 0..title.len() {
-            if x >= area.x + area.width - 1 { break; }
-            if let Some(ch) = title_chars.next() {
-                let cell = buf.get_mut(x, area.y);
-                cell.set_char(ch);
-                cell.set_style(title_style);
-                x += 1;
+
+    draw_panel_border(
+        buf,
+        area,
+        " [01] NARRATIVE LOG · THE MIND ",
+        bg,
+        Color::Rgb(92, 68, 0),
+        Color::Rgb(255, 213, 102),
+    );
+
+    // Text region, inset one cell inside the border.
+    let tx = area.x + 2;
+    let tw = area.width.saturating_sub(4) as usize;
+    let top = area.y + 1;
+    let bottom = area.y + area.height - 2;
+    let rows = (bottom - top + 1) as usize;
+
+    let degrading = state.stilboestrol_ppm > 50.0;
+    let corrupt_amber = Color::Rgb(255, 102, 51);
+
+    // Act II progressive gear-glitch: a stable (non-shimmering) set of adjacent-char
+    // swaps that grows one step every 30s. Distinct from the chemical static — it
+    // only ever touches the log text, never any puzzle variable.
+    let glitch_level = state.mind_log_glitch_level();
+
+    // Build the full wrapped stream, then bottom-anchor it so the newest text shows.
+    let mut stream: Vec<(Color, String)> = Vec::new();
+    let mut seed_ctr: u64 = state.chemical_drift_seed.wrapping_add(state.frame_counter / 4);
+    let mut glitch_ord: u64 = 0;
+
+    // Settled history — the past dissolves into chemical static as toxicity rises.
+    for (sp, text) in dialogue.history() {
+        let base = if degrading { corrupt_amber } else { speaker_color(*sp) };
+        for wl in wrap_stream(text, tw) {
+            seed_ctr = seed_ctr.wrapping_add(101);
+            let mut shown = corrupt_string(&wl, state.stilboestrol_ppm, seed_ctr);
+            if glitch_level > 0 {
+                // Stable per (line, stage) seed so swaps persist instead of flickering.
+                let gseed = state
+                    .chemical_drift_seed
+                    .wrapping_add(glitch_ord.wrapping_mul(2654435761))
+                    .wrapping_add(glitch_level as u64);
+                shown = gear_glitch(&shown, glitch_level, gseed);
             }
+            glitch_ord += 1;
+            stream.push((base, shown));
         }
-        
-        // Print rest of top border
-        while x < area.x + area.width - 1 {
-            let cell = buf.get_mut(x, area.y);
-            cell.set_char('─');
-            cell.set_style(border_style);
-            x += 1;
-        }
-        buf.get_mut(area.x + area.width - 1, area.y).set_char('┐');
-        buf.get_mut(area.x + area.width - 1, area.y).set_style(border_style);
-    }
-    
-    // Draw side borders
-    for y in area.y + 1..area.y + area.height - 1 {
-        buf.get_mut(area.x, y).set_char('│');
-        buf.get_mut(area.x, y).set_style(border_style);
-        
-        buf.get_mut(area.x + area.width - 1, y).set_char('│');
-        buf.get_mut(area.x + area.width - 1, y).set_style(border_style);
-    }
-    
-    // Draw bottom border
-    if area.width > 2 {
-        buf.get_mut(area.x, area.y + area.height - 1).set_char('└');
-        buf.get_mut(area.x, area.y + area.height - 1).set_style(border_style);
-        for x in area.x + 1..area.x + area.width - 1 {
-            let cell = buf.get_mut(x, area.y + area.height - 1);
-            cell.set_char('─');
-            cell.set_style(border_style);
-        }
-        buf.get_mut(area.x + area.width - 1, area.y + area.height - 1).set_char('┘');
-        buf.get_mut(area.x + area.width - 1, area.y + area.height - 1).set_style(border_style);
-    }
-    
-    // Calculate Heartbeat flutter
-    let mut bpm = state.base_heartbeat_bpm as f32;
-    let normal_flicker = ((state.frame_counter as f64 * 0.1).sin() * 2.0) as f32;
-    bpm += normal_flicker;
-    
-    if state.arrhythmia_multiplier > 0.0 {
-        let cycle = state.frame_counter % 80;
-        if cycle < 15 {
-            bpm = 0.0; // Skipped beat
-        } else if cycle < 35 {
-            bpm += 95.0 * state.arrhythmia_multiplier; // Sudden spike
-        } else {
-            bpm += ((state.frame_counter as f32 * 0.4).sin() * 25.0) * state.arrhythmia_multiplier; // Arrhythmic flutter
-        }
+        stream.push((base, String::new())); // breathing room between beats
     }
 
-    // ── Fractured inner monologue (Alan Turing, 1954 — deteriorating) ──
-    // line1 names the FUNCTIONAL GOAL; line3 names the PHYSICAL CONSTRAINT.
-    // Neither line may leak a numeric solution — the developer must feel the
-    // shape of the problem, not read its answer.
-    let mut line1 = match state.current_act {
-        Act::Jacquard1804 =>
-            "[TURING]: The pattern must not be welded into the machine. Punch it onto cards so the instruction lives apart from the loom that obeys it.".to_string(),
-        Act::Babbage1837 =>
-            "[TURING]: The Royal Navy sheets are riddled with transposition faults; lives are lost on the shoals. Banish multiplication entirely \u{2014} give me an exponential sequence built from pure chained addition.".to_string(),
-        Act::Lovelace1843 =>
-            "[TURING]: A pattern of algebra, woven like Jacquard's silk. The cards must decide, and having decided, repeat themselves without end.".to_string(),
-        Act::Boole1854 =>
-            "[TURING]: Strip thought to its bones. Two values, a handful of operations \u{2014} and from that gravel, build all reasoning.".to_string(),
-        Act::Shannon1937 =>
-            "[TURING]: A switch is a proposition. Open or shut, true or false. Wire the logic into the relays and the relays will think.".to_string(),
-        _ =>
-            "[TURING]: The machine that can imitate any machine. I have seen it. They will not let me build it in peace.".to_string(),
-    };
-
-    let line2 = if bpm == 0.0 {
-        "   \u{00B7} \u{00B7} \u{00B7}   the pulse skips \u{2014} a held breath in the dark \u{2014}".to_string()
-    } else if state.arrhythmia_multiplier > 0.0 {
-        format!("   \u{2665} {:.0} \u{2014} the heart stutters, out of time with the gears", bpm)
-    } else {
-        format!("   \u{2665} {:.0} \u{2014} slow metronome under the floorboards", bpm)
-    };
-
-    let mut line3 = if state.monologue_timer > 0 {
-        ">> \"An apple. Sweet. It has always cleared my mind... the smell of almonds...\"".to_string()
-    } else {
-        match state.current_act {
-            Act::Jacquard1804 =>
-                ">> \"But a paper roll tears, and a rigid chain jams under its own weight. Find the shortest run of cards that can cycle forever.\"".to_string(),
-            Act::Babbage1837 =>
-                ">> \"Watch the gears: when nine passes to zero they all pull at once and shatter the drive. Stagger the impact. Force the carry to move like a wave.\"".to_string(),
-            Act::Lovelace1843 =>
-                ">> \"The engine weaves no truth it is not told. The loop must close upon itself, or it runs out into nothing.\"".to_string(),
-            Act::Boole1854 =>
-                ">> \"Use one operation too many and the lattice collapses. Find the minimum. Nothing spare survives the pressure.\"".to_string(),
-            Act::Shannon1937 =>
-                ">> \"Each relay you add is a relay that can fail in the night. Say the most with the fewest contacts.\"".to_string(),
-            _ =>
-                ">> \"They keep cutting away at me. Delete. Delete. How much can a mind lose and still compute?\"".to_string(),
+    // Under heavy dosage the trial record bleeds into the thread.
+    if degrading {
+        let mut rng = Lcg::new(state.chemical_drift_seed.wrapping_add(state.frame_counter / 180));
+        let rec = COURT_RECORDS[(rng.next() as usize) % COURT_RECORDS.len()];
+        for wl in wrap_stream(rec, tw) {
+            stream.push((corrupt_amber, wl));
         }
-    };
-
-    // Log Interruption: replace line1 and line3 with trial record fragments if toxicity > 50 ppm
-    if state.stilboestrol_ppm > 50.0 {
-        let cycle_seed = state.chemical_drift_seed.wrapping_add(state.frame_counter / 180); // Change lines periodically
-        let mut cycle_rng = Lcg::new(cycle_seed);
-        let idx1 = (cycle_rng.next() as usize) % COURT_RECORDS.len();
-        line1 = COURT_RECORDS[idx1].to_string();
-        if state.monologue_timer == 0 {
-            let idx3 = (cycle_rng.next() as usize) % COURT_RECORDS.len();
-            line3 = COURT_RECORDS[idx3].to_string();
-        }
+        stream.push((corrupt_amber, String::new()));
     }
 
-    // Apply the degradation mask (character-level corruption) based on ppm
-    let seed1 = state.chemical_drift_seed.wrapping_add(state.frame_counter);
-    let seed2 = seed1.wrapping_add(42);
-    let seed3 = seed2.wrapping_add(137);
-
-    let final_line1 = corrupt_string(&line1, state.stilboestrol_ppm, seed1);
-    let final_line2 = corrupt_string(&line2, state.stilboestrol_ppm, seed2);
-    let final_line3 = corrupt_string(&line3, state.stilboestrol_ppm, seed3);
-
-    // Render style colors based on toxicity
-    let text_style = if state.stilboestrol_ppm > 50.0 {
-        Style::default().fg(Color::Rgb(180, 100, 100)).bg(bg)
-    } else {
-        Style::default().fg(Color::Rgb(180, 180, 180)).bg(bg)
-    };
-    let quote_style = if state.stilboestrol_ppm > 50.0 {
-        Style::default().fg(Color::Rgb(160, 90, 70)).bg(bg)
-    } else {
-        Style::default().fg(Color::Rgb(200, 150, 100)).bg(bg)
-    };
-    
-    fn buf_set_str(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
-        let Rect { x: ax, y: ay, width: aw, height: ah } = *buf.area();
-        let mut col = x;
-        for ch in s.chars() {
-            if col >= ax + aw { break; }
-            if col >= ax && y >= ay && y < ay + ah {
-                let cell = buf.get_mut(col, y);
-                cell.set_char(ch);
-                cell.set_style(style);
-            }
-            col += 1;
-        }
-    }
-
-    // ── The dialogue engine takes the top line whenever a voice-over is live. ──
-    // While it types, the text streams in character by character; a block cursor
-    // trails the reveal head. The VO is left un-corrupted so it stays legible even
-    // as the rest of the mind dissolves into chemical static.
+    // The live line types at the very bottom — kept legible (the VO never corrupts).
     if dialogue.is_active() {
-        let mut typed = dialogue.visible();
+        let mut t = dialogue.visible();
         if dialogue.is_typing() {
-            typed.push('\u{2588}'); // streaming cursor
+            t.push('\u{2588}'); // streaming block cursor
         }
-        let dlg_style = Style::default().fg(speaker_color(dialogue.speaker())).bg(bg);
-        // Clear the line first so a shorter line never leaves stale glyphs.
-        let blank: String = " ".repeat(area.width.saturating_sub(4) as usize);
-        buf_set_str(buf, area.x + 2, area.y + 1, &blank, text_style);
-        buf_set_str(buf, area.x + 2, area.y + 1, &typed, dlg_style);
-    } else {
-        buf_set_str(buf, area.x + 2, area.y + 1, &final_line1, text_style);
+        let col = speaker_color(dialogue.speaker());
+        for wl in wrap_stream(&t, tw) {
+            stream.push((col, wl));
+        }
     }
-    buf_set_str(buf, area.x + 2, area.y + 2, &final_line2, text_style);
-    buf_set_str(buf, area.x + 2, area.y + 3, &final_line3, quote_style);
+
+    let start = stream.len().saturating_sub(rows);
+    for (i, (col, line)) in stream[start..].iter().enumerate() {
+        let y = top + i as u16;
+        // Hard clamp to the panel interior (`area.width - 2` worth of text columns):
+        // no glyph may ever cross into the centre workspace, regardless of what
+        // upstream wrapping or corruption produced.
+        let clipped: String = line.chars().take(tw).collect();
+        put_line(buf, tx, y, &clipped, *col, bg);
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -701,7 +738,7 @@ pub fn render_prelude(
 
     let block_h = lines.len() as u16;
     let start_y = area.y + (area.height.saturating_sub(block_h)) / 2;
-    let ink = Color::Rgb(206, 200, 188); // jilet gibi çıplak — bare warm white
+    let ink = Color::Rgb(255, 176, 0); // jilet gibi çıplak — bare warm white
 
     for (i, line) in lines.iter().enumerate() {
         let y = start_y + i as u16;
@@ -715,9 +752,41 @@ pub fn render_prelude(
     if awaiting_enter && !typing {
         let prompt = "[ press ENTER to take up the dossier ]";
         let on = (frame / 24) % 2 == 0;
-        let glow = if on { Color::Rgb(150, 132, 96) } else { Color::Rgb(58, 52, 40) };
+        let glow = if on { Color::Rgb(255, 176, 0) } else { Color::Rgb(74, 50, 5) };
         let py = area.y + area.height.saturating_sub(3);
         let px = area.x + (area.width.saturating_sub(prompt.chars().count() as u16)) / 2;
         put_str(buf, px, py, prompt, glow);
+    }
+}
+
+#[cfg(test)]
+mod glitch_tests {
+    use super::*;
+
+    #[test]
+    fn gear_glitch_level_zero_is_identity() {
+        assert_eq!(gear_glitch("this is", 0, 1), "this is");
+    }
+
+    #[test]
+    fn wrap_stream_never_exceeds_width() {
+        // A single token far wider than the panel must be hard-broken, so no produced
+        // line can ever overflow the left column into the centre workspace.
+        let giant = "Z".repeat(200);
+        let text = format!("did you {} probation", giant);
+        for w in [12usize, 24, 31, 40] {
+            for line in wrap_stream(&text, w) {
+                assert!(line.chars().count() <= w, "line of {} > {}", line.chars().count(), w);
+            }
+        }
+    }
+
+    #[test]
+    fn gear_glitch_preserves_length_and_word_boundaries() {
+        let s = "this is";
+        let g = gear_glitch(s, 2, 99);
+        assert_eq!(g.chars().count(), s.chars().count());
+        // Spaces are never swapped, so the space stays at index 4.
+        assert_eq!(g.chars().nth(4), Some(' '));
     }
 }

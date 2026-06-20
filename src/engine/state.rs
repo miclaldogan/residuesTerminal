@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Act {
     Jacquard1804,
     Babbage1837,
@@ -24,6 +24,10 @@ pub enum TuringPhase {
 /// black-void monologue → silent ambient study → live interactive puzzle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenState {
+    /// Phase 0 — the candlelit main menu, drawn before any simulation runs. This is the
+    /// default state on launch; the player crosses into the prelude or a resumed act
+    /// from here.
+    MainMenu,
     /// Phase 1 — pure #000000 canvas; the cinematic typewriter monologue alone.
     NarrativePrelude,
     /// Phase 2 — the full 3-panel split is visible, but [THE WORKSPACE] is a dark,
@@ -31,6 +35,13 @@ pub enum ScreenState {
     AmbientDesk,
     /// Phase 3 — [THE WORKSPACE] renders the live puzzle; the engine is interactive.
     ActivePuzzle,
+    /// Cinematic — the historic figure's portrait + biography, shown when an act begins
+    /// (New Game or after the prior act's outro). `act_id` is 1-based; `text_index`
+    /// pages through the biography lines; `timer` counts frames since activation.
+    ActIntro { act_id: u8, text_index: usize, timer: u64 },
+    /// Cinematic — the tragic outcome of the act just completed, shown before the next
+    /// act's intro. Same field semantics as [`ScreenState::ActIntro`].
+    ActOutro { act_id: u8, text_index: usize, timer: u64 },
 }
 
 impl ScreenState {
@@ -69,7 +80,15 @@ pub struct GlobalStateContext {
 
     // Render Döngüsü Sayacı
     pub frame_counter: u64,          // Alev titreşimi ve animasyon fazı hesaplaması için kare sayacı
+
+    // ── Akt-bağlamlı ilerleyen bozulma (progressive glitch) zamanlayıcısı ──
+    pub act_elapsed_ticks: u64,      // Mevcut akt başladığından beri geçen tick sayısı
+    timer_prev_act: Act,             // Akt değişimini yakalayıp zamanlayıcıyı sıfırlamak için
 }
+
+/// Engine tick cadence — the main loop ticks every 16ms (~62.5 fps); we use 62 so a
+/// "second" of progressive decay is measured deterministically against `act_elapsed_ticks`.
+const TICKS_PER_SEC: u64 = 62;
 
 impl GlobalStateContext {
     pub fn new() -> Self {
@@ -77,7 +96,7 @@ impl GlobalStateContext {
             current_act: Act::Jacquard1804,
             active_turing_phase: TuringPhase::Clarity,
             acts_completed: Vec::new(),
-            screen_state: ScreenState::NarrativePrelude,
+            screen_state: ScreenState::MainMenu,
             desk_reveal: 0.0,
             stilboestrol_ppm: 0.0,
             vision_blur_factor: 0.0,
@@ -89,6 +108,51 @@ impl GlobalStateContext {
             base_heartbeat_bpm: 72,
             arrhythmia_multiplier: 0.0,
             frame_counter: 0,
+            act_elapsed_ticks: 0,
+            timer_prev_act: Act::Jacquard1804,
+        }
+    }
+
+    /// Real-time seconds elapsed inside the current act (since the last act change).
+    pub fn act_seconds(&self) -> u64 {
+        self.act_elapsed_ticks / TICKS_PER_SEC
+    }
+
+    /// The master progressive-decay scalar, gated strictly by act context. This is the
+    /// single source of truth for time-based corruption; each act reads it differently.
+    ///
+    ///   Act I  (Jacquard) → 0.0 always: absolute mechanical sanity.
+    ///   Act II (Babbage)  → +1.0 every 30s: mind-log gear-alignment text errors.
+    ///   Act III(Lovelace) → +1.0 every 45s: editor-line adjacent-swap hand tremor.
+    ///   Others            → 0.0 (Boole/Shannon drive their own chemical systems).
+    pub fn corruption_factor(&self) -> f32 {
+        match self.current_act {
+            Act::Jacquard1804 => 0.0,
+            Act::Babbage1837 => self.act_seconds() as f32 / 30.0,
+            Act::Lovelace1843 => self.act_seconds() as f32 / 45.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Number of adjacent character swaps to bleed into the mind-log buffer (Act II
+    /// only). Each 30-second stage adds one more gear-misalignment swap, capped so the
+    /// log degrades but never becomes pure noise. Puzzle variables are never touched.
+    pub fn mind_log_glitch_level(&self) -> usize {
+        if self.current_act == Act::Babbage1837 {
+            (self.corruption_factor().floor() as usize).min(8)
+        } else {
+            0
+        }
+    }
+
+    /// Probability that committing an editor line transposes an adjacent character
+    /// pair (Act III only) — the rising hand tremor. Ramps in 0.10 steps every 45s,
+    /// capped at 0.6 so the player can always correct it with Backspace.
+    pub fn lovelace_input_swap_chance(&self) -> f32 {
+        if self.current_act == Act::Lovelace1843 {
+            (self.corruption_factor().floor() * 0.10).clamp(0.0, 0.6)
+        } else {
+            0.0
         }
     }
 
@@ -103,6 +167,22 @@ impl GlobalStateContext {
     /// Alev titreşimi, hap dağılımı ve metronom fazı bu sayaca bağlıdır.
     pub fn tick(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+
+        // ── Progressive-glitch timer: reset on act change, otherwise accumulate. ──
+        if self.current_act != self.timer_prev_act {
+            self.timer_prev_act = self.current_act;
+            self.act_elapsed_ticks = 0;
+        } else {
+            self.act_elapsed_ticks = self.act_elapsed_ticks.saturating_add(1);
+        }
+
+        // ── Heartbeat recovery: ease the base rate back toward a resting 70 BPM at
+        //    ~1 BPM/sec, so an interrogation spike (140) decays as the player calms
+        //    instead of staying pinned forever. ──
+        const RESTING_BPM: u32 = 70;
+        if self.frame_counter % TICKS_PER_SEC == 0 && self.base_heartbeat_bpm > RESTING_BPM {
+            self.base_heartbeat_bpm -= 1;
+        }
 
         // Zamanla mumun erimesi (Stilboestrol ppm seviyesine göre hızlanır)
         let interval = if self.stilboestrol_ppm > 80.0 {
@@ -136,5 +216,57 @@ impl GlobalStateContext {
         if self.screen_state.desk_visible() && self.desk_reveal < 1.0 {
             self.desk_reveal = (self.desk_reveal + 0.02).min(1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn act_one_has_absolute_sanity() {
+        let mut s = GlobalStateContext::new();
+        s.current_act = Act::Jacquard1804;
+        s.act_elapsed_ticks = TICKS_PER_SEC * 600; // ten minutes in
+        assert_eq!(s.corruption_factor(), 0.0);
+        assert_eq!(s.mind_log_glitch_level(), 0);
+        assert_eq!(s.lovelace_input_swap_chance(), 0.0);
+    }
+
+    #[test]
+    fn babbage_log_glitch_unlocks_every_30s() {
+        let mut s = GlobalStateContext::new();
+        s.current_act = Act::Babbage1837;
+        s.act_elapsed_ticks = TICKS_PER_SEC * 29;
+        assert_eq!(s.mind_log_glitch_level(), 0);
+        s.act_elapsed_ticks = TICKS_PER_SEC * 60; // two full 30s stages
+        assert_eq!(s.mind_log_glitch_level(), 2);
+        assert_eq!(s.lovelace_input_swap_chance(), 0.0); // wrong act
+    }
+
+    #[test]
+    fn lovelace_input_swap_ramps_every_45s_and_is_capped() {
+        let mut s = GlobalStateContext::new();
+        s.current_act = Act::Lovelace1843;
+        s.act_elapsed_ticks = TICKS_PER_SEC * 44;
+        assert_eq!(s.lovelace_input_swap_chance(), 0.0);
+        s.act_elapsed_ticks = TICKS_PER_SEC * 90; // two stages → 0.20
+        assert!((s.lovelace_input_swap_chance() - 0.20).abs() < 1e-6);
+        s.act_elapsed_ticks = TICKS_PER_SEC * 10_000; // far in → clamped
+        assert!(s.lovelace_input_swap_chance() <= 0.6);
+        assert_eq!(s.mind_log_glitch_level(), 0); // wrong act
+    }
+
+    #[test]
+    fn timer_resets_on_act_change() {
+        let mut s = GlobalStateContext::new();
+        s.tick();
+        s.tick();
+        assert_eq!(s.act_elapsed_ticks, 2);
+        s.current_act = Act::Babbage1837;
+        s.tick(); // change detected → reset to 0
+        assert_eq!(s.act_elapsed_ticks, 0);
+        s.tick();
+        assert_eq!(s.act_elapsed_ticks, 1);
     }
 }

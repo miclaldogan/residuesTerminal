@@ -11,18 +11,18 @@ use super::mind_log::{DialogueEngine, Speaker, VoiceCue};
 use super::layout;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TrueColor Palette Constants — workspace brass/mechanical theme
+// TrueColor Palette Constants — monochrome amber-on-black theme
 // ─────────────────────────────────────────────────────────────────────────────
-const WS_BG:           Color = Color::Rgb(12, 11, 10);
-const HEADER_FG:       Color = Color::Rgb(220, 170, 80);
-const DIM_FG:          Color = Color::Rgb(80, 70, 60);
-const VAL_FG:          Color = Color::Rgb(240, 200, 120);
-const GEAR_FG:         Color = Color::Rgb(210, 140, 60);
-const MATCH_OK:        Color = Color::Rgb(80, 200, 80);
-const ERROR_FG:        Color = Color::Rgb(255, 60, 40);
-const WARN_FG:         Color = Color::Rgb(255, 180, 40);
-const PHASE1_ACCENT:   Color = Color::Rgb(180, 150, 100);
-const PHASE2_ACCENT:   Color = Color::Rgb(210, 110, 60);
+const WS_BG:           Color = Color::Rgb(10, 8, 0);
+const HEADER_FG:       Color = Color::Rgb(255, 213, 102);
+const DIM_FG:          Color = Color::Rgb(74, 50, 5);
+const VAL_FG:          Color = Color::Rgb(255, 176, 0);
+const GEAR_FG:         Color = Color::Rgb(255, 176, 0);
+const MATCH_OK:        Color = Color::Rgb(255, 213, 102);
+const ERROR_FG:        Color = Color::Rgb(255, 102, 51);
+const WARN_FG:         Color = Color::Rgb(255, 176, 0);
+const PHASE1_ACCENT:   Color = Color::Rgb(255, 176, 0);
+const PHASE2_ACCENT:   Color = Color::Rgb(153, 104, 10);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Simulation Constants
@@ -195,9 +195,9 @@ fn draw_box(buf: &mut Buffer, rect: Rect, style: Style) {
 }
 
 fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, line2: &str) {
-    let err_bg = Color::Rgb(35, 8, 8);
+    let err_bg = Color::Rgb(20, 14, 0);
     let code_style = Style::default().fg(ERROR_FG).bg(err_bg);
-    let text_style = Style::default().fg(Color::Rgb(180, 50, 40)).bg(err_bg);
+    let text_style = Style::default().fg(Color::Rgb(255, 140, 50)).bg(err_bg);
     let hint_style = Style::default().fg(DIM_FG).bg(err_bg);
 
     let overlay_h: u16 = 9;
@@ -207,7 +207,7 @@ fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, l
 
     let overlay_rect = Rect::new(ox, oy, overlay_w, overlay_h);
     buf_fill_bg(buf, overlay_rect, err_bg);
-    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(120, 30, 30)).bg(err_bg));
+    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(153, 104, 10)).bg(err_bg));
 
     let cx = ox + overlay_w / 2;
     let code_half = code.len() as u16 / 2;
@@ -221,9 +221,9 @@ fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, l
 }
 
 fn render_victory_overlay(buf: &mut Buffer, area: Rect) {
-    let vic_bg = Color::Rgb(10, 22, 12);
-    let gold = Style::default().fg(Color::Rgb(255, 210, 80)).bg(vic_bg);
-    let sub = Style::default().fg(Color::Rgb(120, 185, 100)).bg(vic_bg);
+    let vic_bg = Color::Rgb(15, 12, 0);
+    let gold = Style::default().fg(Color::Rgb(255, 213, 102)).bg(vic_bg);
+    let sub = Style::default().fg(Color::Rgb(255, 176, 0)).bg(vic_bg);
     let dim = Style::default().fg(DIM_FG).bg(vic_bg);
 
     let overlay_h: u16 = 9;
@@ -233,7 +233,7 @@ fn render_victory_overlay(buf: &mut Buffer, area: Rect) {
 
     let overlay_rect = Rect::new(ox, oy, overlay_w, overlay_h);
     buf_fill_bg(buf, overlay_rect, vic_bg);
-    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(60, 130, 70)).bg(vic_bg));
+    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(153, 104, 10)).bg(vic_bg));
 
     let cx = ox + overlay_w / 2;
     let title = "THE DIFFERENCE ENGINE COMPLETE";
@@ -321,7 +321,7 @@ pub fn render_workspace(
     if w < 20 || h < 10 { return; }
 
     // Border
-    let border_style = Style::default().fg(Color::Rgb(140, 110, 80)).bg(WS_BG);
+    let border_style = Style::default().fg(Color::Rgb(102, 68, 0)).bg(WS_BG);
     draw_box(buf, area, border_style);
 
     // Title Header
@@ -339,7 +339,7 @@ pub fn render_workspace(
     }
 
     let dim_style  = Style::default().fg(DIM_FG).bg(WS_BG);
-    let section_style = Style::default().fg(Color::Rgb(160, 140, 100)).bg(WS_BG);
+    let section_style = Style::default().fg(Color::Rgb(153, 104, 10)).bg(WS_BG);
     let val_style = Style::default().fg(VAL_FG).bg(WS_BG);
     let gear_style = Style::default().fg(GEAR_FG).bg(WS_BG);
 
@@ -383,9 +383,9 @@ pub fn render_workspace(
         let is_selected = puzzle.phase == BabbagePhase::MethodOfDifferences && puzzle.cursor_col == i;
         let border_color = if is_selected {
             let pulse = ((state.frame_counter as f64 * 0.15).sin() * 30.0) as i16;
-            Color::Rgb((220 + pulse).clamp(180, 255) as u8, (180 + pulse).clamp(140, 255) as u8, (80 + pulse).clamp(40, 255) as u8)
+            Color::Rgb((255 + pulse).clamp(200, 255) as u8, (176 + pulse).clamp(130, 220) as u8, (0 + pulse).clamp(0, 40) as u8)
         } else {
-            Color::Rgb(100, 90, 80)
+            Color::Rgb(74, 50, 5)
         };
         let box_style = Style::default().fg(border_color).bg(WS_BG);
 
@@ -413,7 +413,7 @@ pub fn render_workspace(
                 format!("[ {} ]", " ".repeat(COLUMN_WEIGHTS[i] as usize))
             };
             let style = if !active {
-                Style::default().fg(Color::Rgb(90, 80, 70)).bg(WS_BG)
+                Style::default().fg(Color::Rgb(74, 50, 5)).bg(WS_BG)
             } else if in_phase {
                 Style::default().fg(MATCH_OK).bg(WS_BG)
             } else {
@@ -424,7 +424,7 @@ pub fn render_workspace(
             // In Phase 2 the cursor lives on the delay buffers.
             let is_selected = puzzle.cursor_col == i;
             let final_style = if is_selected {
-                style.fg(Color::Rgb(255, 230, 150))
+                style.fg(Color::Rgb(255, 213, 102))
             } else {
                 style
             };
@@ -449,7 +449,7 @@ pub fn render_workspace(
     // ── Status footer — the latest log line set in a brass measuring gauge. ──
     if let Some((msg, kind)) = puzzle.status_log.last() {
         let col = match kind {
-            LogKind::Info    => Color::Rgb(170, 150, 110),
+            LogKind::Info    => Color::Rgb(153, 104, 10),
             LogKind::Error   => ERROR_FG,
             LogKind::Warning => WARN_FG,
             LogKind::Success => MATCH_OK,
@@ -472,7 +472,7 @@ pub fn render_workspace(
             for dx in 0..5 {
                 let x = cx0 + dx;
                 let ch = corrupt_chars[(rng.next() as usize) % corrupt_chars.len()];
-                let cell_style = Style::default().fg(Color::Rgb(220, 50, 50)).bg(WS_BG);
+                let cell_style = Style::default().fg(Color::Rgb(255, 102, 51)).bg(WS_BG);
                 buf_set(buf, x, y, ch, cell_style);
             }
         }
@@ -531,15 +531,15 @@ pub fn handle_babbage_input(
         // column; Up/Down always *act* on that column in the current phase. This
         // removes the phase-desynchronisation deadlock that froze the keyboard.
         match key.code {
-            KeyCode::Left => {
+            KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => {
                 puzzle.cursor_col = puzzle.cursor_col.saturating_sub(1);
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => {
                 if puzzle.cursor_col < 2 {
                     puzzle.cursor_col += 1;
                 }
             }
-            KeyCode::Up => match puzzle.phase {
+            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => match puzzle.phase {
                 BabbagePhase::MethodOfDifferences => {
                     puzzle.columns[puzzle.cursor_col] = (puzzle.columns[puzzle.cursor_col] + 1).min(999);
                     check_phase1_match(puzzle);
@@ -550,7 +550,7 @@ pub fn handle_babbage_input(
                     puzzle.push_log(format!("Delay buffer D{} installed.", puzzle.cursor_col), LogKind::Info);
                 }
             },
-            KeyCode::Down => match puzzle.phase {
+            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => match puzzle.phase {
                 BabbagePhase::MethodOfDifferences => {
                     puzzle.columns[puzzle.cursor_col] = (puzzle.columns[puzzle.cursor_col] - 1).max(0);
                     check_phase1_match(puzzle);

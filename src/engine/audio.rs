@@ -1,11 +1,66 @@
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+/// Resolve the `audio/` asset directory at runtime so the binary works from any CWD
+/// and survives being moved/distributed: first look for an `audio/` folder next to the
+/// executable (the shipping layout), then fall back to the crate source tree (dev).
+fn resolve_audio_base() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("audio");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Crate-free audio: we drive a detached command-line player (mpv / ffplay /
-// mpg123). The TUI never touches the audio device directly; it just spawns and
-// reaps short-lived child processes, keeping the alternate screen uncorrupted by
-// redirecting every child's stdio to /dev/null.
+// Crate-free audio: we drive detached command-line players (mpv / ffplay / mpg123)
+// plus low-latency `paplay` for keystrokes. The TUI never touches the audio device
+// directly — it spawns and reaps short-lived child processes, redirecting every
+// child's stdio to /dev/null so the alternate screen is never corrupted.
+//
+// Concurrency model: `AudioEngine` is owned and touched by exactly one thread (the
+// main loop). There are no Rust threads, channels, locks or shared mutable state —
+// the only "async" is the detached OS processes — so there are no data races and no
+// channel deadlocks possible, even under fast keyboard input. Process handles are
+// pooled and reaped lazily so nothing piles up or zombifies.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ── Asset paths (relative to `audio/`) ──────────────────────────────────────
+/// Perpetual looping ambient beds: `(relative path, volume%)`. Raised from the old
+/// 15% "whisper" because at that level the rain, the low bump and the background score
+/// were inaudible under the clacks — these now sit as a present-but-background layer.
+const AMBIENT_TRACKS: &[(&str, u8)] = &[
+    ("ambient/rain_wilmslow_loop.mp3", 45),
+    ("ambient/backgroundMusic.mp3", 38),
+    ("sfx/bump.mp3", 50),
+    ("ambient/clock_pendulum_loop.mp3", 35),
+];
+/// Short, single typewriter clack — one strike per committed character.
+const SFX_KEY: &str = "sfx/daktiloOne.mp3";
+/// High-frequency clatter for rapid binary entry (Shannon bit masks).
+const SFX_KEY_FAST: &str = "sfx/daktiloFast.mp3";
+/// Heavy, deliberate mechanical click — the Turing tape head sliding cell to cell.
+const SFX_HEAD: &str = "sfx/Slow_deliberate_key__#4-1781700108983.mp3";
+/// The slow, deliberate mechanical key — the menu-selection confirmation click.
+const SFX_MENU_CLICK: &str = "sfx/Slow_deliberate_key__#1-1781700096418.mp3";
+const SFX_BACKSPACE: &str = "sfx/daktilo_backspace_snap.mp3";
+const SFX_GLITCH: &str = "sfx/electrical_short_glitch.mp3";
+const SFX_HEARTBEAT: &str = "sfx/heartbeat_base.mp3";
+
+// ── Volume ceilings (player-percent, 100 = nominal) ─────────────────────────
+const HEARTBEAT_VOLUME: u8 = 62;
+const BACKSPACE_VOLUME: u8 = 88;
+const GLITCH_VOLUME: u8 = 92;
+const SPEECH_VOLUME: u8 = 100;
+const MENU_CLICK_VOLUME: u8 = 90;
+const KEY_FALLBACK_VOLUME: u8 = 80;
+/// Cap on simultaneously-sounding clacks, so mashing a key can't pile detached players
+/// into an overlapping smear — extra strikes past this are dropped until some finish.
+const MAX_CONCURRENT_CLACKS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Player {
@@ -47,25 +102,32 @@ fn marker_to_rel(marker: &str) -> Option<&'static str> {
         "VO_TURING_SPEECH_5" => "turing/turingSpeech5Cough.mp3",
         "VO_TURING_SPEECH_6" => "turing/turingSpeech6.mp3",
         "SFX_DOOR_SLIDE" => "sfx/A_single,_isolated_s_#1-1781700210070.mp3",
+        // Heavy interrogation bootstep — reuse the deep bump as a one-shot thud.
+        "SFX_POLICE_BOOTSTEP" => "sfx/bump.mp3",
         _ => return None,
     })
 }
 
-/// The runtime audio mixer. Owns three voices: a looping heartbeat, a looping
-/// typewriter clatter that runs only while text is streaming, and a one-shot speech
-/// channel that replaces itself on each new line.
+/// The runtime audio mixer. Owns: two looping ambient beds, a BPM-scheduled one-shot
+/// heartbeat, a one-shot speech channel, a low-latency typewriter-clack pool, and a
+/// generic one-shot SFX pool (backspace snap, electrical glitch).
 pub struct AudioEngine {
     player: Player,
-    heartbeat: Option<Child>,
-    speech: Option<Child>,
-    clacks: Vec<Child>, // short-lived per-letter typewriter strikes, reaped lazily
-    clack_wav: Option<String>, // pre-decoded WAV for low-latency paplay clacks
+    ambient: Vec<Child>,        // perpetual rain + pendulum beds (started past prelude)
+    ambient_started: bool,
+    heartbeat: Option<Child>,   // one-shot per scheduled beat (replaces a fixed loop)
+    speech: Option<Child>,      // one-shot voice line; replaces itself each play
+    clacks: Vec<Child>,         // per-letter typewriter strikes, reaped lazily
+    sfx: Vec<Child>,            // misc one-shot SFX (backspace, glitch), reaped lazily
+    clack_wav: Option<String>,  // pre-decoded WAV for low-latency paplay clacks
+    base: PathBuf,              // resolved `audio/` directory (CWD-independent)
+    muted: bool,                // master mute, toggled from the main menu
 }
 
 /// Pre-decode the typewriter clack to a WAV and confirm `paplay` exists. A WAV +
 /// paplay starts in ~milliseconds, so firing one per keystroke can't choke the
 /// heavier speech `mpv` the way spawning an mpv per letter would.
-fn prepare_clack() -> Option<String> {
+fn prepare_clack(base: &Path) -> Option<String> {
     let has = |bin: &str| {
         Command::new(bin)
             .arg("--version")
@@ -78,8 +140,8 @@ fn prepare_clack() -> Option<String> {
     if !has("paplay") || !has("ffmpeg") {
         return None;
     }
-    let src = format!("{}/audio/sfx/daktiloOne.mp3", env!("CARGO_MANIFEST_DIR"));
-    let dst = std::env::temp_dir().join("residues_daktilo.wav");
+    let src = base.join(SFX_KEY);
+    let dst = std::env::temp_dir().join("residues_key.wav");
     let ok = Command::new("ffmpeg")
         .args(["-y", "-loglevel", "quiet", "-i"])
         .arg(&src)
@@ -98,19 +160,64 @@ fn prepare_clack() -> Option<String> {
 }
 
 impl AudioEngine {
-    /// Detect a player and start the perpetual heartbeat loop immediately.
+    /// Detect a player and pre-decode the keystroke clack. Ambient beds are deferred
+    /// until the game crosses past the prelude (see [`AudioEngine::ensure_ambient`]),
+    /// and the heartbeat is now driven beat-by-beat from the main loop, not looped.
     pub fn new() -> Self {
         let player = detect_player();
-        let mut engine = Self {
+        let base = resolve_audio_base();
+        let clack_wav = prepare_clack(&base);
+        Self {
             player,
+            ambient: Vec::new(),
+            ambient_started: false,
             heartbeat: None,
             speech: None,
             clacks: Vec::new(),
-            clack_wav: prepare_clack(),
-        };
-        // The suffocating bump-loop runs for the whole session.
-        engine.heartbeat = engine.spawn("sfx/bump.mp3", true, 55);
-        engine
+            sfx: Vec::new(),
+            clack_wav,
+            base,
+            muted: false,
+        }
+    }
+
+    /// Flip the master mute. Muting silences everything currently sounding and resets
+    /// the ambient latch, so the rain/pendulum beds restart cleanly on unmute. Driven
+    /// by the main-menu AUDIO toggle.
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        if muted {
+            Self::reap(&mut self.heartbeat);
+            Self::reap(&mut self.speech);
+            for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
+                for c in pool.iter_mut() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                pool.clear();
+            }
+            self.ambient_started = false;
+        }
+    }
+
+    /// The slow, deliberate confirmation click fired when a menu choice is committed.
+    pub fn menu_click(&mut self) {
+        self.fire_oneshot(SFX_MENU_CLICK, MENU_CLICK_VOLUME);
+    }
+
+    /// Spin up the perpetual ambient beds (rain, bump, background score, pendulum).
+    /// Safe to call every frame — it only does work the first time (idempotent), so the
+    /// caller can simply invoke it whenever the desk is visible (past the prelude).
+    pub fn ensure_ambient(&mut self) {
+        if self.ambient_started || self.player == Player::None || self.muted {
+            return;
+        }
+        self.ambient_started = true;
+        for (path, volume) in AMBIENT_TRACKS {
+            if let Some(c) = self.spawn(path, true, *volume) {
+                self.ambient.push(c);
+            }
+        }
     }
 
     /// Measure a cue's sample length in 62.5 fps frames via ffprobe, so the typewriter
@@ -118,7 +225,7 @@ impl AudioEngine {
     /// cue has no sample or ffprobe is unavailable.
     pub fn duration_frames(&self, marker: &str) -> Option<u32> {
         let rel = marker_to_rel(marker)?;
-        let path = format!("{}/audio/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = self.base.join(rel);
         let out = Command::new("ffprobe")
             .args(["-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0"])
             .arg(&path)
@@ -130,10 +237,10 @@ impl AudioEngine {
     }
 
     fn spawn(&self, rel: &str, looping: bool, volume: u8) -> Option<Child> {
-        if self.player == Player::None {
+        if self.player == Player::None || self.muted {
             return None;
         }
-        let path = format!("{}/audio/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let path = self.base.join(rel);
         let mut cmd = match self.player {
             Player::Mpv => {
                 let mut c = Command::new("mpv");
@@ -149,7 +256,12 @@ impl AudioEngine {
             }
             Player::Ffplay => {
                 let mut c = Command::new("ffplay");
-                c.arg("-nodisp").arg("-autoexit").arg("-loglevel").arg("quiet");
+                c.arg("-nodisp")
+                    .arg("-autoexit")
+                    .arg("-loglevel")
+                    .arg("quiet")
+                    .arg("-volume")
+                    .arg(volume.to_string());
                 if looping {
                     c.arg("-loop").arg("0");
                 }
@@ -159,6 +271,9 @@ impl AudioEngine {
             Player::Mpg123 => {
                 let mut c = Command::new("mpg123");
                 c.arg("-q");
+                // mpg123 scales 0..32768; map the 0..100 percent onto that range.
+                let scale = (volume as u32 * 327).min(32768);
+                c.arg("-f").arg(scale.to_string());
                 if looping {
                     c.arg("--loop").arg("-1");
                 }
@@ -181,20 +296,36 @@ impl AudioEngine {
         }
     }
 
-    /// Fire a one-shot cue (a Turing speech line, the door slide). Any speech still
-    /// playing is cut so lines never pile up on top of each other.
+    /// Hard-terminate any in-flight voice/speech take. The voice samples are detached
+    /// child processes that would otherwise keep playing to their natural end even after
+    /// the screen state moves on — so when a player skips a monologue or leaves a
+    /// narrative state, the main loop calls this to cut the audio dead immediately.
+    pub fn stop_voice_tracks(&mut self) {
+        Self::reap(&mut self.speech);
+    }
+
+    /// Fire a one-shot cue (a Turing speech line, the door slide, a bootstep). Any
+    /// speech still playing is cut so lines never pile up on top of each other.
     pub fn play_marker(&mut self, marker: &str) {
         if let Some(rel) = marker_to_rel(marker) {
             Self::reap(&mut self.speech);
-            self.speech = self.spawn(rel, false, 100);
+            self.speech = self.spawn(rel, false, SPEECH_VOLUME);
         }
     }
 
-    /// Fire one typewriter clack — called once per committed letter, so "was" makes
-    /// three strikes. Finished clacks are reaped first so processes never pile up.
+    /// Fire one typewriter clack — called once per committed letter (dialogue stream
+    /// or Lovelace editor line). Finished clacks are reaped first so processes never
+    /// pile up under fast input.
     pub fn daktilo_strike(&mut self) {
-        // Reap finished strikes first so processes never pile up.
+        if self.muted {
+            return;
+        }
         self.clacks.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        // Drop the strike entirely if a smear of clacks is already sounding — keeps
+        // fast key-repeat from stacking detached players into an overlapping mush.
+        if self.clacks.len() >= MAX_CONCURRENT_CLACKS {
+            return;
+        }
         let child = if let Some(wav) = &self.clack_wav {
             // Low-latency PulseAudio/PipeWire path — won't starve the speech stream.
             Command::new("paplay")
@@ -206,10 +337,54 @@ impl AudioEngine {
                 .spawn()
                 .ok()
         } else {
-            self.spawn("sfx/daktiloOne.mp3", false, 80)
+            self.spawn(SFX_KEY, false, KEY_FALLBACK_VOLUME)
         };
         if let Some(c) = child {
             self.clacks.push(c);
+        }
+    }
+
+    /// A high-frequency typewriter click for rapid binary-path entry (Shannon). Pooled
+    /// and capped exactly like the regular clack so fast 0/1 entry can't smear.
+    pub fn daktilo_fast(&mut self) {
+        self.clacks.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if self.clacks.len() >= MAX_CONCURRENT_CLACKS {
+            return;
+        }
+        if let Some(c) = self.spawn(SFX_KEY_FAST, false, KEY_FALLBACK_VOLUME) {
+            self.clacks.push(c);
+        }
+    }
+
+    /// The heavy mechanical snap of a Backspace correction / fumbled-line clear.
+    pub fn backspace_snap(&mut self) {
+        self.fire_oneshot(SFX_BACKSPACE, BACKSPACE_VOLUME);
+    }
+
+    /// The sharp electrical blowout — a mis-struck gate or a failed `R` verification.
+    pub fn glitch(&mut self) {
+        self.fire_oneshot(SFX_GLITCH, GLITCH_VOLUME);
+    }
+
+    /// The heavy mechanical click of the Turing read/write head sliding one cell.
+    pub fn head_click(&mut self) {
+        self.fire_oneshot(SFX_HEAD, BACKSPACE_VOLUME);
+    }
+
+    /// Fire one scheduled heartbeat. Called from the main loop at the live BPM cadence
+    /// (skipped beats simply omit the call), so the audible pulse tracks the on-screen
+    /// `VITAL: ♡ {bpm}` exactly, including arrhythmia spikes and dropped beats. The
+    /// previous beat is reaped so rapid (spiked) beats never overlap into mush.
+    pub fn heartbeat_beat(&mut self) {
+        Self::reap(&mut self.heartbeat);
+        self.heartbeat = self.spawn(SFX_HEARTBEAT, false, HEARTBEAT_VOLUME);
+    }
+
+    /// Spawn a pooled one-shot SFX, reaping any finished siblings first.
+    fn fire_oneshot(&mut self, rel: &str, volume: u8) {
+        self.sfx.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if let Some(c) = self.spawn(rel, false, volume) {
+            self.sfx.push(c);
         }
     }
 }
@@ -219,9 +394,11 @@ impl Drop for AudioEngine {
         // Never leave detached players howling after the TUI exits.
         Self::reap(&mut self.heartbeat);
         Self::reap(&mut self.speech);
-        for c in self.clacks.iter_mut() {
-            let _ = c.kill();
-            let _ = c.wait();
+        for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
+            for c in pool.iter_mut() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 }

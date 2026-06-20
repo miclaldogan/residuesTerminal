@@ -13,22 +13,22 @@ use super::layout;
 // ─────────────────────────────────────────────────────────────────────────────
 // TrueColor Palette Constants — workspace amber/parchment theme
 // ─────────────────────────────────────────────────────────────────────────────
-const WS_BG:           Color = Color::Rgb(15, 14, 12);
-const HEADER_FG:       Color = Color::Rgb(255, 210, 120);
-const TEXT_FG:         Color = Color::Rgb(200, 180, 140);
-const DIM_FG:          Color = Color::Rgb(80, 70, 55);
-const CELL_ON:         Color = Color::Rgb(220, 180, 100);
-const CELL_OFF:        Color = Color::Rgb(50, 45, 38);
-const TARGET_ON:       Color = Color::Rgb(120, 100, 70);
-const TARGET_OFF:      Color = Color::Rgb(40, 37, 32);
-const MATCH_OK:        Color = Color::Rgb(80, 200, 80);
-const MATCH_FAIL:      Color = Color::Rgb(220, 60, 60);
-const ERROR_FG:        Color = Color::Rgb(255, 60, 40);
-const WARN_FG:         Color = Color::Rgb(255, 180, 40);
-const WEAVE_SCANNER:   Color = Color::Rgb(100, 200, 255);
-const PHASE1_ACCENT:   Color = Color::Rgb(180, 140, 90);
-const PHASE2_ACCENT:   Color = Color::Rgb(140, 160, 180);
-const PHASE3_ACCENT:   Color = Color::Rgb(100, 200, 140);
+const WS_BG:           Color = Color::Rgb(10, 8, 0);       // deep amber-black
+const HEADER_FG:       Color = Color::Rgb(255, 213, 102);   // bright amber header
+const TEXT_FG:         Color = Color::Rgb(255, 176, 0);     // standard amber
+const DIM_FG:          Color = Color::Rgb(74, 50, 5);       // amber ghost/dim
+const CELL_ON:         Color = Color::Rgb(255, 176, 0);     // amber cell active
+const CELL_OFF:        Color = Color::Rgb(42, 30, 2);       // very dark amber cell
+const TARGET_ON:       Color = Color::Rgb(153, 104, 10);    // target amber dim
+const TARGET_OFF:      Color = Color::Rgb(34, 24, 2);       // target amber ghost
+const MATCH_OK:        Color = Color::Rgb(255, 213, 102);   // amber bright (success)
+const MATCH_FAIL:      Color = Color::Rgb(255, 102, 51);    // amber-orange (fail)
+const ERROR_FG:        Color = Color::Rgb(255, 102, 51);    // amber-orange error
+const WARN_FG:         Color = Color::Rgb(255, 176, 0);     // amber warning
+const WEAVE_SCANNER:   Color = Color::Rgb(255, 213, 102);   // amber bright scanner
+const PHASE1_ACCENT:   Color = Color::Rgb(255, 176, 0);     // amber
+const PHASE2_ACCENT:   Color = Color::Rgb(153, 104, 10);    // dim amber
+const PHASE3_ACCENT:   Color = Color::Rgb(255, 213, 102);   // bright amber
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Simulation Constants
@@ -234,9 +234,9 @@ fn draw_box(buf: &mut Buffer, rect: Rect, style: Style) {
 }
 
 fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, line2: &str) {
-    let err_bg = Color::Rgb(35, 8, 8);
+    let err_bg = Color::Rgb(20, 12, 0);
     let code_style = Style::default().fg(ERROR_FG).bg(err_bg);
-    let text_style = Style::default().fg(Color::Rgb(180, 50, 40)).bg(err_bg);
+    let text_style = Style::default().fg(Color::Rgb(200, 100, 20)).bg(err_bg);
     let hint_style = Style::default().fg(DIM_FG).bg(err_bg);
 
     let overlay_h: u16 = 9;
@@ -246,7 +246,7 @@ fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, l
 
     let overlay_rect = Rect::new(ox, oy, overlay_w, overlay_h);
     buf_fill_bg(buf, overlay_rect, err_bg);
-    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(120, 30, 30)).bg(err_bg));
+    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(120, 70, 10)).bg(err_bg));
 
     let cx = ox + overlay_w / 2;
     let code_half = code.len() as u16 / 2;
@@ -260,9 +260,9 @@ fn render_error_overlay(buf: &mut Buffer, area: Rect, code: &str, line1: &str, l
 }
 
 fn render_victory_overlay(buf: &mut Buffer, area: Rect) {
-    let vic_bg = Color::Rgb(10, 22, 12);
-    let gold = Style::default().fg(Color::Rgb(255, 210, 80)).bg(vic_bg);
-    let sub = Style::default().fg(Color::Rgb(120, 185, 100)).bg(vic_bg);
+    let vic_bg = Color::Rgb(15, 12, 0);
+    let gold = Style::default().fg(Color::Rgb(255, 213, 102)).bg(vic_bg);
+    let sub = Style::default().fg(Color::Rgb(255, 176, 0)).bg(vic_bg);
     let dim = Style::default().fg(DIM_FG).bg(vic_bg);
 
     let overlay_h: u16 = 9;
@@ -272,7 +272,7 @@ fn render_victory_overlay(buf: &mut Buffer, area: Rect) {
 
     let overlay_rect = Rect::new(ox, oy, overlay_w, overlay_h);
     buf_fill_bg(buf, overlay_rect, vic_bg);
-    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(60, 130, 70)).bg(vic_bg));
+    draw_box(buf, overlay_rect, Style::default().fg(Color::Rgb(92, 68, 0)).bg(vic_bg));
 
     let cx = ox + overlay_w / 2;
     let title = "THE LOOM IS COMPLETE";
@@ -573,13 +573,14 @@ pub fn handle_jacquard_input(key: KeyEvent, puzzle: &mut JacquardPuzzle, state: 
             puzzle.push_log("[TREMOR]: Double-strike key registered".into(), LogKind::Warning);
         }
         match key.code {
-            // ── Navigation ──
-            KeyCode::Up => {
+            // ── Navigation ── (W/S mirror Up/Down; A/D remain add/delete-card here,
+            //    so horizontal cursor movement stays on the arrow keys.)
+            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') => {
                 if puzzle.cursor_row > 0 {
                     puzzle.cursor_row -= 1;
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('S') => {
                 if puzzle.cursor_row + 1 < puzzle.cards.len() {
                     puzzle.cursor_row += 1;
                 }

@@ -6,3 +6,8 @@ edition = "2021"
 [dependencies]
 ratatui = "0.26"
 crossterm = "0.27"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# Decode PNG/JPEG portraits at runtime for the half-block pixel-art engine. Trimmed to
+# just the two codecs we ship so the dependency stays lean and cross-platform.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
