@@ -2,7 +2,23 @@
 name = "residues_terminal"
 version = "0.1.0"
 edition = "2021"
+authors = ["Iclal Doğan <m.iclaldogan@gmail.com>"]
+description = "A terminal-native narrative puzzle game about the birth of computation, set inside the failing mind of Alan Turing."
+readme = "README.md"
+repository = "https://github.com/miclaldogan/residuesTerminal"
+homepage = "https://github.com/miclaldogan/residuesTerminal"
+license = "MIT"
+keywords = ["game", "tui", "terminal", "puzzle", "ratatui"]
+categories = ["games", "command-line-utilities"]
+
+# The MIT license covers the source code only. The bundled audio (audio/) and image
+# (images/) assets are NOT MIT-licensed — see the License section of README.md.
 
 [dependencies]
 ratatui = "0.26"
 crossterm = "0.27"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# Decode PNG/JPEG portraits at runtime for the half-block pixel-art engine. Trimmed to
+# just the two codecs we ship so the dependency stays lean and cross-platform.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
