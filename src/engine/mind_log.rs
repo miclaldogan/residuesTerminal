@@ -177,7 +177,7 @@ pub enum Seg {
 /// fillers. `P(..)` beats hold silent (no daktilo) where the take pauses/coughs, so
 /// the words still land under his voice; the engine then auto-stretches the whole
 /// line to the take's measured length. The only on-screen deletion is a deliberate
-/// draft he types and erases (line 4: "i am talking-").
+/// draft he types and erases (line 4: "I remember-").
 pub const PRELUDE_SCRIPT: &[&[Seg]] = &[
     // 1 — turingSpeech1 → "You see, every systematic logic inherits a ghost. A residue."
     &[
@@ -227,9 +227,9 @@ pub const PRELUDE_SCRIPT: &[&[Seg]] = &[
     &[
         Seg::P(45),                 // [long pause]
         Seg::P(35),                 // [clears throat]
-        Seg::T("i am talking-"),
+        Seg::T("I remember-"),
         Seg::P(18),                 // [short pause]
-        Seg::B(13),                 // "Delete that. Backspace." — erase the draft
+        Seg::B(11),                 // "Delete that. Backspace." — erase the draft (11 chars)
         Seg::P(45),                 // [long pause]
         Seg::P(30),                 // Ah... [gasp]
         Seg::T("Only to realize"),
@@ -274,6 +274,12 @@ enum Atom {
     Del,
     Wait(u16),
 }
+
+/// Fraction of a voice take's measured length the typewriter is stretched across. Below
+/// 1.0 the words type a little faster than the speaker and land a beat before the audio
+/// ends — the platen leads, then waits, instead of dragging to the final breath. Applies
+/// to every synced line: the Turing prelude and the cinematic act-intro biographies.
+const SYNC_LEAD: f32 = 0.80;
 
 /// Nominal frame cost of an atom before the per-line audio-sync scale is applied.
 fn atom_base(a: &Atom) -> u16 {
@@ -356,7 +362,10 @@ impl DialogueEngine {
 
         let nominal: u32 = atoms.iter().map(|a| atom_base(a) as u32).sum::<u32>().max(1);
         self.scale = match target_frames {
-            Some(t) if t > 0 => (t as f32 / nominal as f32).clamp(0.3, 8.0),
+            // Type to only `SYNC_LEAD` of the take's length: the words run a touch faster
+            // than the voice and finish a beat early, so the platen leads the speaker and
+            // settles before the line trails off (rather than dragging to the last breath).
+            Some(t) if t > 0 => ((t as f32 * SYNC_LEAD) / nominal as f32).clamp(0.3, 8.0),
             _ => 1.0,
         };
         self.done = atoms.is_empty();
