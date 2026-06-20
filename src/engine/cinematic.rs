@@ -161,8 +161,10 @@ pub fn outro(act_id: u8) -> Scene {
             title: "\u{2014} THE BITTEN APPLE \u{2014}",
             image_rel: "turing_outro.png",
             lines: &[
-                "Prosecuted for who he was, sentenced to chemical ruin, Turing was stripped of the secrets he had guarded.",
-                "He died beside a half-eaten apple. Decades later, a nation he saved would beg his pardon.",
+                "Whether it was an accident or an answer, no one can say.",
+                "He kept an apple at his bedside, as he always had,",
+                "and, in those last years, cyanide in the next room.",
+                "One night the machine came to rest, and did not start again.",
             ],
         },
     }
@@ -200,11 +202,66 @@ pub fn render_outro(
     frame: u64,
     awaiting_enter: bool,
 ) {
+    // Act VI's "THE BITTEN APPLE" outro shows NO apple image — by design the apple's only
+    // appearance is in the final-credits syllogism. Here the closing lines breathe, centred
+    // on a pure black void (no title, no glyph rain).
+    if act_id >= 6 {
+        render_bitten_apple_outro(f, area, dialogue, frame, awaiting_enter);
+        return;
+    }
     let scene = outro(act_id);
-    // The bitten-apple finale (Act VI) hoists its image high into the centre-top, well
-    // clear of the bottom narrative box (a generous 12-row lift from the dialogue band).
-    let img_gap = if act_id >= 6 { 12 } else { 0 };
-    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.16, img_gap);
+    render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.16, 0);
+}
+
+/// The Act VI "bitten apple" outro: deliberately apple-less (the apple lives in the final
+/// credits) and drawn on a pure, fully black background — no title, no residue glyph rain,
+/// no decay particles. Only the centred body text and the ENTER prompt (foot).
+fn render_bitten_apple_outro(
+    f: &mut Frame,
+    area: Rect,
+    dialogue: &DialogueEngine,
+    frame: u64,
+    awaiting_enter: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let void = Color::Rgb(0, 0, 0);
+
+    let buf = f.buffer_mut();
+    // Pure black canvas — nothing drawn behind the text.
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = buf.get_mut(x, y);
+            cell.set_char(' ');
+            cell.fg = void;
+            cell.bg = void;
+        }
+    }
+
+    // The closing narration, typewritten + word-wrapped, the block centred vertically.
+    let ink = Color::Rgb(222, 198, 150);
+    let max_w = area.width.saturating_sub(6).max(8) as usize;
+    let mut text = dialogue.visible();
+    let typing = dialogue.is_typing();
+    if typing && (frame / 16) % 2 == 0 {
+        text.push('\u{2588}');
+    }
+    let wrapped = wrap_words(&text, max_w);
+    let block_h = wrapped.len() as u16;
+    let start_y = area.y + area.height.saturating_sub(block_h) / 2;
+    for (i, line) in wrapped.iter().enumerate() {
+        put_center(buf, area, start_y + i as u16, line, ink);
+    }
+
+    // ENTER prompt near the bottom once the line has finished streaming.
+    if awaiting_enter && !typing {
+        let prompt = "[ press ENTER to continue ]";
+        let on = (frame / 24) % 2 == 0;
+        let glow = if on { Color::Rgb(205, 150, 70) } else { Color::Rgb(70, 56, 36) };
+        let py = area.y + area.height.saturating_sub(1);
+        put_center(buf, area, py, prompt, glow);
+    }
 }
 
 /// Frames per character for the credits typewriter — the same incremental cadence as the
@@ -234,7 +291,7 @@ fn stream_center(buf: &mut Buffer, area: Rect, y: u16, full: &str, budget: &mut 
 // ── Finale timing (frames @ ~62.5 fps). ──
 const HALT_HOLD: u64 = 100;     // "FATAL ERROR: SYSTEM HALTED" frozen, in silence
 const WATERFALL_DUR: u64 = 240; // the binary cascade draining to black
-const APPLE_HOLD: u64 = 70;     // the apple alone before the syllogism types
+const POST_RAIN_HOLD: u64 = 70; // a held black beat after the rain, before the syllogism
 const PHASE_GAP: u64 = 100;     // a held beat between movements
 
 /// The 1952 letter to Norman Routledge — the structural syllogism.
@@ -252,13 +309,20 @@ const PARDON: &[&str] = &[
     "It took fifty-nine years to apologize.",
 ];
 
-/// A tiny inline LCG for the deterministic-per-cell waterfall (no deps, no state).
+/// A tiny inline hash for the deterministic-per-cell waterfall (no deps, no state).
+/// Ends in a SplitMix64 avalanche so that even the LOW bits are well distributed — the old
+/// version returned a raw LCG step, and reading its low bits via `% n` / `& 1` produced the
+/// alternating "101010" and the mirror-across-thirds banding. Every bit is now usable.
 fn cell_rng(x: u16, y: u16, t: u64) -> u64 {
     let mut s = (x as u64)
         .wrapping_mul(0x9E3779B97F4A7C15)
         .wrapping_add((y as u64).wrapping_mul(0xC2B2AE3D27D4EB4F))
-        .wrapping_add(t);
-    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        .wrapping_add(t.wrapping_mul(0xD1B54A32D192ED03));
+    s ^= s >> 30;
+    s = s.wrapping_mul(0xBF58476D1CE4E5B9);
+    s ^= s >> 27;
+    s = s.wrapping_mul(0x94D049BB133111EB);
+    s ^= s >> 31;
     s
 }
 
@@ -272,7 +336,7 @@ fn block_chars(lines: &[&str]) -> usize {
 /// loop gates the ENTER key against this. Derived purely from the phase constants.
 pub fn credits_exit_frame() -> u64 {
     let w_end = HALT_HOLD + WATERFALL_DUR;
-    let syll_start = w_end + APPLE_HOLD;
+    let syll_start = w_end + POST_RAIN_HOLD;
     let syll_done = syll_start + block_chars(SYLLOGISM) as u64 * CREDIT_FRAMES_PER_CHAR;
     let pardon_start = syll_done + PHASE_GAP;
     let pardon_done = pardon_start + block_chars(PARDON) as u64 * CREDIT_FRAMES_PER_CHAR;
@@ -282,16 +346,20 @@ pub fn credits_exit_frame() -> u64 {
 /// The closing teardown, hardcoded and unskippable per spec §8 (the metronome is cut to
 /// silence in the audio layer the instant this state is entered). Driven by `elapsed`
 /// frames since FinalCredits began:
-///   FATAL ERROR → binary waterfall → centred apple → 1952 syllogism → 2013 pardon → exit.
+///   FATAL ERROR → binary waterfall → 1952 syllogism → 2013 pardon → exit.
 pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64) {
-    let buf = f.buffer_mut();
     let void = Color::Rgb(0, 0, 0);
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            let cell = buf.get_mut(x, y);
-            cell.set_char(' ');
-            cell.fg = void;
-            cell.bg = void;
+
+    // Clear the whole viewport to void each frame.
+    {
+        let buf = f.buffer_mut();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.get_mut(x, y);
+                cell.set_char(' ');
+                cell.fg = void;
+                cell.bg = void;
+            }
         }
     }
 
@@ -299,52 +367,83 @@ pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64)
 
     // ── Phase 1 — the frozen halt. ──
     if elapsed < HALT_HOLD {
+        let buf = f.buffer_mut();
         let blink = (frame / 12) % 2 == 0;
         let col = if blink { Color::Rgb(255, 70, 40) } else { Color::Rgb(120, 30, 15) };
         put_center(buf, area, cy, "FATAL ERROR: SYSTEM HALTED", col);
         return;
     }
 
-    // ── Phase 2 — the binary waterfall: every cell mutates into a downward stream of
-    //    1s and 0s, draining to black column by column. ──
+    // ── Phase 2 — the binary rain. Every column falls independently: its own start delay
+    //    and fall speed, a bright leading head with a fading tail, digits shimmering frame
+    //    to frame. A global dim-out over the final frames drains the screen cleanly to void
+    //    before the apple appears — the screen dissolves into living binary, then nothing. ──
     let w_start = HALT_HOLD;
     let w_end = HALT_HOLD + WATERFALL_DUR;
     if elapsed < w_end {
-        let local = elapsed - w_start;
-        for x in area.x..area.x + area.width {
-            // Per-column phase offset + a 70%-of-duration fall so trailing columns finish
-            // slightly later — the cascade reads as rain, not a hard wipe.
-            let offset = (cell_rng(x, 0, 7) % 40) as u64;
-            let prog = (local.saturating_sub(offset)) as f32 / (WATERFALL_DUR as f32 * 0.70);
-            let black_top = (prog.clamp(0.0, 1.0) * area.height as f32) as u16;
-            for row in 0..area.height {
-                let y = area.y + row;
-                if row < black_top {
-                    continue; // already drained to black
+        const TAIL: i64 = 12; // lit rows trailing behind each falling head
+        let buf = f.buffer_mut();
+        let local = (elapsed - w_start) as i64;
+        let remaining = w_end - elapsed;
+        let fade = (remaining as f32 / 45.0).min(1.0); // ease to black over the last ~45 frames
+        let h = area.height as i64;
+        for col in 0..area.width {
+            let x = area.x + col;
+            // Independent per-column parameters from well-mixed high-entropy hashes — no
+            // shared phase, so there is no horizontal symmetry or repeating structure.
+            let delay = (cell_rng(col, 0x1A1, 1) % 48) as i64;
+            let step = 2 + (cell_rng(col, 0x2B2, 2) % 4) as i64; // 2..5 frames per row
+            let head = (local - delay) / step; // head row; negative before the column starts
+            if head < 0 {
+                continue;
+            }
+            for row in 0..h {
+                let behind = head - row; // 0 at the head, increasing up the trail
+                if behind < 0 || behind >= TAIL {
+                    continue; // not yet reached, or already drained past
                 }
-                let digit = if cell_rng(x, y, elapsed / 2) & 1 == 0 { '0' } else { '1' };
-                // Bright leading edge, fading to dim emerald down the stream.
-                let lead = row == black_top;
-                let depth = (row - black_top) as f32 / area.height.max(1) as f32;
-                let g = (235.0 - depth * 150.0) as u8;
-                let col = if lead { Color::Rgb(200, 255, 200) } else { Color::Rgb(40, g.max(60), 40) };
-                put(buf, x, y, digit, col, void);
+                let y = area.y + row as u16;
+                // The digit mutates over time so each stream shimmers as it falls.
+                let digit = if cell_rng(col, row as u16, (local / 2) as u64) & 1 == 0 { '0' } else { '1' };
+                let t = behind as f32 / TAIL as f32; // 0 = head, 1 = tail end
+                let col_rgb = if behind == 0 {
+                    // Bright amber-white leading head (the project's warm ember palette).
+                    Color::Rgb((255.0 * fade) as u8, (225.0 * fade) as u8, (150.0 * fade) as u8)
+                } else {
+                    // Warm amber body fading to dim ember down the trail — R > G > B, no green.
+                    let warm = 1.0 - t; // 1 just behind the head, 0 at the tail end
+                    let r = ((60.0 + 195.0 * warm) * fade) as u8; // 255 → 60
+                    let g = ((20.0 + 136.0 * warm) * fade) as u8; // 156 → 20
+                    let b = ((30.0 * warm) * fade) as u8; //          30 →  0
+                    Color::Rgb(r, g, b)
+                };
+                put(buf, x, y, digit, col_rgb, void);
             }
         }
         return;
     }
 
-    // ── Post-waterfall — the apple centrepiece, held above the text band. ──
-    let apple_y = cy.saturating_sub(5);
-    draw_apple(buf, area, apple_y);
+    // ── Post-waterfall — the bitten apple, the SAME image_engine half-block render the
+    //    "THE BITTEN APPLE" act outro's asset provides (the same red apple PNG), dimmed to a
+    //    low glow and centred in the void above the text. This is the one place the apple
+    //    appears. Drawn from `f` directly, so no buffer borrow is held across the call.
+    //    POST_RAIN_HOLD gives a held black beat after the rain before the syllogism types. ──
+    let apple_w = area.width.min(40);
+    let apple_h = (area.height / 3).clamp(6, 12);
+    let apple_x = area.x + area.width.saturating_sub(apple_w) / 2;
+    let apple_y = cy.saturating_sub(apple_h + 1);
+    let apple_area = Rect { x: apple_x, y: apple_y, width: apple_w, height: apple_h };
+    // draw_backdrop is crash-safe on a missing asset (returns false, no SIGNAL-LOST card).
+    let _ = image_engine::draw_backdrop(f, apple_area, &images_base().join(outro(6).image_rel), 0.6, frame);
 
     // Streaming clocks derived from the (deterministic) phase boundaries.
-    let syll_start = w_end + APPLE_HOLD;
+    let syll_start = w_end + POST_RAIN_HOLD;
     let syll_done = syll_start + block_chars(SYLLOGISM) as u64 * CREDIT_FRAMES_PER_CHAR;
     let pardon_start = syll_done + PHASE_GAP;
     let pardon_done = pardon_start + block_chars(PARDON) as u64 * CREDIT_FRAMES_PER_CHAR;
     let exit_start = pardon_done + PHASE_GAP;
 
+    let buf = f.buffer_mut();
     if elapsed < pardon_start {
         // ── Phase 3 — the syllogism, typed line by line below the apple. ──
         let mut budget = (elapsed.saturating_sub(syll_start) / CREDIT_FRAMES_PER_CHAR) as usize;
@@ -357,7 +456,7 @@ pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64)
         }
     } else {
         // ── Phase 4 — the syllogism clears silently; the administrative seal types in an
-        //    affectless, bureaucratic gray. ──
+        //    affectless, bureaucratic gray, below the apple where the syllogism was. ──
         let mut budget = (elapsed.saturating_sub(pardon_start) / CREDIT_FRAMES_PER_CHAR) as usize;
         let seal = Color::Rgb(150, 150, 150);
         let mut ty = cy + 1;
@@ -377,31 +476,6 @@ pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64)
             let on = (frame / 24) % 2 == 0;
             let prompt = if on { Color::Rgb(120, 112, 96) } else { Color::Rgb(50, 47, 40) };
             put_center(buf, area, py + 2, "[ the terminal will not answer \u{2014} press ENTER to leave ]", prompt);
-        }
-    }
-}
-
-/// The half-eaten green apple silhouette, centred horizontally at `top`. Bite + stem.
-fn draw_apple(buf: &mut Buffer, area: Rect, top: u16) {
-    let body = Color::Rgb(120, 200, 80); // living green
-    let dark = Color::Rgb(40, 80, 30);   // the bitten shadow
-    let stem = Color::Rgb(110, 80, 40);
-    let void = Color::Rgb(0, 0, 0);
-    let art: [(&str, Color); 4] = [
-        ("  \u{2572}      ", stem), // the stem ╲
-        (" \u{2584}\u{2588}\u{2588}\u{2584}   ", body),
-        ("\u{2580}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591} ", body),
-        ("  \u{2580}\u{2580}    ", body),
-    ];
-    let w = 8u16;
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    for (i, (line, col)) in art.iter().enumerate() {
-        // The bite (░) is rendered in the darker shade for depth.
-        let mut cx = x;
-        for ch in line.chars() {
-            let c = if ch == '\u{2591}' { dark } else { *col };
-            put(buf, cx, top + i as u16, ch, c, void);
-            cx += 1;
         }
     }
 }

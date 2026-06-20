@@ -326,7 +326,7 @@ pub fn render_shannon(
         ShannonPhase::ErrorCorrect => "PHASE 2: ERROR-CORRECT",
     };
     let header = clip(
-        &format!(" INFORMATION CHANNEL \u{2500}\u{2500} {} (1948) ", phase_name),
+        &format!(" INFORMATION CHANNEL \u{2500}\u{2500} {} (1937) ", phase_name),
         w.saturating_sub(4) as usize,
     );
     buf_set_str(buf, x0 + 2, y0, &header, Style::default().fg(HEADER_FG).bg(WS_BG));

@@ -152,6 +152,26 @@ pub fn draw_backdrop(
     true
 }
 
+/// Project `image_path` dimmed (RGB × `brightness`) AND with an analog-glitch overlay
+/// scaled by `glitch_intensity` — both at once. Used for the desk's atmospheric outro
+/// image, where brightness tracks the candle and the glitch tracks the chemical decay.
+/// No "SIGNAL LOST" card on a missing asset (returns `false`), so the desk simply shows
+/// nothing rather than a placeholder. Returns `true` once drawn.
+pub fn draw_scene_dim(
+    f: &mut Frame,
+    area: Rect,
+    image_path: &Path,
+    glitch_intensity: f32,
+    brightness: f32,
+    frame_count: u64,
+) -> bool {
+    if area.width == 0 || area.height == 0 || load_cached(image_path).is_none() {
+        return false;
+    }
+    render_image(f, area, image_path, glitch_intensity, brightness, frame_count, false);
+    true
+}
+
 /// Core half-block projector. `brightness` scales every channel (1.0 = true colour,
 /// 0.25 = the dimmed menu backdrop). `fallback` selects whether a missing asset draws
 /// the placeholder card (portraits) or is silently skipped (backdrops, handled by the

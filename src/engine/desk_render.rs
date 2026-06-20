@@ -5,7 +5,8 @@ use ratatui::{
     Frame,
 };
 
-use super::state::{Act, GlobalStateContext};
+use super::image_engine;
+use super::state::{Act, GlobalStateContext, CANDLE_MAX_ROWS};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 24-bit candlelight gradient anchors (the light-degradation engine)
@@ -27,6 +28,13 @@ const SHADOW_RUBBLE: Color = Color::Rgb(34, 34, 34);
 
 // The haunting, desaturated hue of a solved act's ghost
 const GHOST_HUE: Color = Color::Rgb(26, 26, 26);
+
+/// Master switch for the low-res Braille "ghost head" portraits — both the engraved face
+/// on the dossier card and the ghost jury of solved acts. Disabled by default: the faces
+/// read as muddy low-res heads floating in an already-busy panel. The full-screen ActIntro
+/// portrait is unaffected (it lives in the cinematic layer, not here). Flip to `true` to
+/// bring the engraved desk portraits back.
+const SHOW_GHOST_PORTRAITS: bool = false;
 
 // Drop-shadow ink for the overlapping paper stack
 const SHEET_SHADOW: Color = Color::Rgb(6, 5, 4);
@@ -424,37 +432,97 @@ fn buf_set_bg(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
 /// the ghost jury of solved acts. Everything is drawn flat, then bathed in a single
 /// quadratic light-attenuation pass anchored on the candle flame.
 pub fn render_desk(f: &mut Frame, area: Rect, state: &GlobalStateContext) {
-    let buf = f.buffer_mut();
     if area.width < 6 || area.height < 6 { return; }
 
-    // 1. The void
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            let cell = buf.get_mut(x, y);
-            cell.set_char(' ');
-            cell.fg = PITCH;
-            cell.bg = PITCH;
+    // ── Phase A (flat buffer draw): the void + the overlapping document stack, including
+    //    the active card's frame, title and word-wrapped dossier text. ──
+    {
+        let buf = f.buffer_mut();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.get_mut(x, y);
+                cell.set_char(' ');
+                cell.fg = PITCH;
+                cell.bg = PITCH;
+            }
         }
+        draw_paper_stack(buf, area, state);
     }
 
-    // 2. The overlapping document stack with cell-shadow drop offsets
-    draw_paper_stack(buf, area, state);
+    // ── Phase B (half-block engine): the act's atmospheric OUTRO image inside the active
+    //    card body. Brightness tracks the candle — subtle even when full, fading toward
+    //    near-black as the candle burns down — so it reads as lit by the candle, not
+    //    self-lit. The glitch overlay tracks the chemical dosage so the image decays along
+    //    with the rest of the desk. (Goes through `f`, so it can't share Phase A's buffer
+    //    borrow — hence the split.) ──
+    if let Some((img_rect, rel)) = active_card_image(area, state) {
+        let candle_frac = (state.candle_rows_remaining as f32 / CANDLE_MAX_ROWS as f32).clamp(0.0, 1.0);
+        let brightness = 0.10 + 0.45 * candle_frac; // subtle at full, near-black when low
+        let glitch = ((state.stilboestrol_ppm - 25.0) / 70.0).clamp(0.0, 0.6);
+        let path = image_engine::images_dir().join(rel);
+        let _ = image_engine::draw_scene_dim(f, img_rect, &path, glitch, brightness, state.frame_counter);
+    }
 
-    // 3. The candle — returns its flame anchor so the light engine knows the source
-    let (flame_x, flame_y, brightness) = draw_candle(buf, area, state);
+    // ── Phase C (flat buffer draw): the candle light source, the shadow apple, the
+    //    scattered pills, the radial light-degradation pass, and the ghost jury. The
+    //    radial pass also dims the image above by its distance from the flame, so the
+    //    existing light engine is preserved and the image is bathed by it too. ──
+    {
+        let buf = f.buffer_mut();
+        let (flame_x, flame_y, brightness) = draw_candle(buf, area, state);
+        draw_apple(buf, area, state);
+        draw_pills(buf, area, state);
+        apply_lighting(buf, area, flame_x, flame_y, brightness, state.desk_reveal);
+        if SHOW_GHOST_PORTRAITS {
+            draw_ghost_jury(buf, area, state);
+        }
+    }
+}
 
-    // 4. The shadow apple (no green, no labels)
-    draw_apple(buf, area, state);
+/// Geometry of the active (top) dossier card, shared by the paper-stack renderer and the
+/// outro-image placement so the two can never drift apart.
+fn active_card_rect(area: Rect) -> Rect {
+    let sheet_w = area.width.saturating_sub(4).min(40).max(12);
+    let sheet_h = 14u16.min(area.height.saturating_sub(8)).max(8);
+    Rect::new(area.x + 2, area.y + 1, sheet_w, sheet_h)
+}
 
-    // 5. Chemical drift — scattered stilboestrol
-    draw_pills(buf, area, state);
+/// Each act's atmospheric OUTRO scene image (machine/room — never the intro portrait).
+fn outro_image_rel(act: Act) -> &'static str {
+    match act {
+        Act::Jacquard1804 => "jacquard_outro.png",
+        Act::Babbage1837 => "babbage_outro.png",
+        Act::Lovelace1843 => "lovelace_outro.png",
+        Act::Boole1854 => "boole_outro.png",
+        Act::Shannon1937 => "shannon_outro.png",
+        Act::Turing1936_1950 => "turing_outro.png",
+    }
+}
 
-    // 6. The light-degradation engine — a single attenuation sweep over the desk.
-    //    `desk_reveal` ramps 0→1 on entry, pulsing the gradient up out of black.
-    apply_lighting(buf, area, flame_x, flame_y, brightness, state.desk_reveal);
-
-    // 7. The ghost jury — drawn AFTER lighting so the dead keep their own dim glow
-    draw_ghost_jury(buf, area, state);
+/// The rect inside the active card that the outro image fills (the body above the
+/// bottom-anchored dossier text), plus the image to draw — or `None` if there isn't room.
+fn active_card_image(area: Rect, state: &GlobalStateContext) -> Option<(Rect, &'static str)> {
+    let active_idx = PAPERS.iter().position(|p| p.act == state.current_act).unwrap_or(0);
+    let paper = &PAPERS[active_idx];
+    let card = active_card_rect(area);
+    if card.height < 6 || card.width < 6 {
+        return None;
+    }
+    let inner_w = card.width.saturating_sub(3) as usize;
+    let body_top = card.y + 3;
+    let body_bot = card.y + card.height - 2;
+    if body_bot < body_top {
+        return None;
+    }
+    let body_rows = (body_bot - body_top + 1) as usize;
+    // The text is bottom-anchored; the image takes whatever body rows remain above it.
+    let text_h = dossier_lines(paper, inner_w, body_rows).len() as u16;
+    let img_h = body_rows as u16 - text_h;
+    if img_h < 2 {
+        return None; // too little headroom for a legible image — skip it
+    }
+    let rect = Rect::new(card.x + 1, body_top, card.width - 2, img_h);
+    Some((rect, outro_image_rel(paper.act)))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -557,10 +625,8 @@ fn buf_set_str_on(buf: &mut Buffer, x: u16, y: u16, s: &str, fg: Color, bg: Colo
 fn draw_paper_stack(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) {
     let active_idx = PAPERS.iter().position(|p| p.act == state.current_act).unwrap_or(0);
 
-    let sheet_w = area.width.saturating_sub(4).min(40).max(12);
-    let sheet_h = 14u16.min(area.height.saturating_sub(8)).max(8);
-    let base_x = area.x + 2;
-    let base_y = area.y + 1;
+    let active = active_card_rect(area);
+    let (sheet_w, sheet_h, base_x, base_y) = (active.width, active.height, active.x, active.y);
 
     // ── Under-sheets: two non-active dossiers peeking from beneath, each
     //    offset down-right and casting its own shadow → an organic stack. ──
@@ -594,7 +660,6 @@ fn draw_paper_stack(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) {
     }
 
     // ── The active dossier on top, fully detailed ──
-    let active = Rect::new(base_x, base_y, sheet_w, sheet_h);
     draw_drop_shadow(buf, active);
     draw_sheet(buf, active, SHEET_ACTIVE_BG, SHEET_BORDER);
     draw_active_paper(buf, active, &PAPERS[active_idx], state);
@@ -621,39 +686,107 @@ fn draw_active_paper(buf: &mut Buffer, sheet: Rect, paper: &PaperMeta, state: &G
     buf_set_str_on(buf, sheet.x + 1, sheet.y + 2, &"─".repeat(sep_w), SHEET_BORDER, bg);
     buf_set_with_bg(buf, sheet.x + sheet.width - 1, sheet.y + 2, '┤', SHEET_BORDER, bg);
 
-    // Portrait — high-resolution Braille engraving, centered in the sheet body.
-    let p_start = sheet.y + 3;
-    let portrait_ch = (sheet.height.saturating_sub(6)).clamp(3, 8) as usize;
-    let portrait_cw = (sheet.width.saturating_sub(4)).clamp(6, 14) as usize;
-    let face = render_face(&paper.face, portrait_cw, portrait_ch);
-    let pad = sheet.width.saturating_sub(2).saturating_sub(portrait_cw as u16) / 2;
-    for (r, cells) in face.iter().enumerate() {
-        let py = p_start + r as u16;
-        if py >= sheet.y + sheet.height - 3 { break; }
-        for (c, (ch, it)) in cells.iter().enumerate() {
-            if *ch == ' ' { continue; }
-            // Brighter ink where the engraving is denser → engraved depth.
-            let col = lerp_color(Color::Rgb(96, 84, 62), PAPER_FG, 0.35 + 0.65 * it);
-            buf_set_fg(buf, ix + pad + c as u16, py, *ch, col);
+    // Portrait — high-resolution Braille engraving, centered in the sheet body. Gated off
+    // by default (see SHOW_GHOST_PORTRAITS): the card is just the stack + dossier text.
+    if SHOW_GHOST_PORTRAITS {
+        let p_start = sheet.y + 3;
+        let portrait_ch = (sheet.height.saturating_sub(6)).clamp(3, 8) as usize;
+        let portrait_cw = (sheet.width.saturating_sub(4)).clamp(6, 14) as usize;
+        let face = render_face(&paper.face, portrait_cw, portrait_ch);
+        let pad = sheet.width.saturating_sub(2).saturating_sub(portrait_cw as u16) / 2;
+        for (r, cells) in face.iter().enumerate() {
+            let py = p_start + r as u16;
+            if py >= sheet.y + sheet.height - 3 { break; }
+            for (c, (ch, it)) in cells.iter().enumerate() {
+                if *ch == ' ' { continue; }
+                // Brighter ink where the engraving is denser → engraved depth.
+                let col = lerp_color(Color::Rgb(96, 84, 62), PAPER_FG, 0.35 + 0.65 * it);
+                buf_set_fg(buf, ix + pad + c as u16, py, *ch, col);
+            }
         }
     }
 
-    // Subtitle + signature, anchored above the bottom border
-    let sub_y = sheet.y + sheet.height - 3;
-    let sig_y = sheet.y + sheet.height - 2;
-    buf_set_str_on(buf, ix + 1, sub_y, paper.subtitle, Color::Rgb(180, 162, 124), bg);
-    buf_set_str_on(buf, ix + 1, sig_y, paper.signature, Color::Rgb(150, 128, 96), bg);
+    // Dossier text (subtitle + signature), word-wrapped to the card's inner width and
+    // anchored above the bottom border, so it never spills past the right frame. If it is
+    // taller than the body it is truncated with an ellipsis rather than bleeding out.
+    let inner_w = sheet.width.saturating_sub(3) as usize;
+    let body_top = sheet.y + 3;
+    let body_bot = sheet.y + sheet.height - 2;
+    if body_bot >= body_top {
+        let body_rows = (body_bot - body_top + 1) as usize;
+        let lines = dossier_lines(paper, inner_w, body_rows);
+        let text_h = lines.len() as u16;
+        let text_top = body_bot.saturating_sub(text_h.saturating_sub(1));
+        for (i, (line, col)) in lines.iter().enumerate() {
+            buf_set_str_on(buf, ix + 1, text_top + i as u16, line, *col, bg);
+        }
+    }
+}
+
+/// Word-wrap on whitespace to `max_w`-wide lines, never splitting a word mid-character
+/// unless the word itself is longer than the line (then it is hard-broken).
+fn wrap_words(text: &str, max_w: usize) -> Vec<String> {
+    let max_w = max_w.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let wlen = word.chars().count();
+        if wlen > max_w {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let chars: Vec<char> = word.chars().collect();
+            let mut i = 0;
+            while chars.len() - i > max_w {
+                lines.push(chars[i..i + max_w].iter().collect());
+                i += max_w;
+            }
+            cur = chars[i..].iter().collect();
+        } else if cur.is_empty() {
+            cur.push_str(word);
+        } else if cur.chars().count() + 1 + wlen <= max_w {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// The card's dossier text as coloured, width-wrapped lines (subtitle then signature),
+/// clipped to `max_rows` with a trailing ellipsis if it would overflow the card body.
+fn dossier_lines(paper: &PaperMeta, inner_w: usize, max_rows: usize) -> Vec<(String, Color)> {
+    let sub_col = Color::Rgb(180, 162, 124);
+    let sig_col = Color::Rgb(150, 128, 96);
+    let mut lines: Vec<(String, Color)> = Vec::new();
+    for l in wrap_words(paper.subtitle, inner_w) {
+        lines.push((l, sub_col));
+    }
+    for l in wrap_words(paper.signature, inner_w) {
+        lines.push((l, sig_col));
+    }
+    if max_rows == 0 {
+        lines.clear();
+    } else if lines.len() > max_rows {
+        lines.truncate(max_rows);
+        if let Some(last) = lines.last_mut() {
+            let keep = inner_w.saturating_sub(1).max(1);
+            let mut s: String = last.0.chars().take(keep).collect();
+            s.push('\u{2026}');
+            last.0 = s;
+        }
+    }
+    lines
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SUBSYSTEM 2: The Candle (half-block light source + UI-less timer)
 // ═════════════════════════════════════════════════════════════════════════════
-
-/// A static sine displacement mask anchored to the absolute screen row, giving the
-/// wax shaft an organic, hand-poured curve that stays spatially stable as it melts.
-fn shaft_offset(row_y: u16) -> i16 {
-    ((row_y as f32 * 0.55).sin() * 1.3).round() as i16
-}
 
 /// A descending wax-run channel. Driven entirely by `frame_counter` so it animates
 /// without any mutable state, then hardens into a fixed deposit at its destination.
@@ -670,8 +803,10 @@ const DRIPS: &[Drip] = &[
     Drip { col_off: 2,  phase: 320, dest_rows: 3, speed: 9 },
 ];
 
-/// Quadrant-block lips for the asymmetrical, sagging melt crater under the flame.
-const RIM_CRATER: [char; 3] = ['▄', '▖', '▗'];
+/// Quadrant-block lips for the melt crater under the flame — left-right symmetric (▖ and ▗
+/// mirror each other around the full-block centre), so the only top irregularity is the
+/// crater dip itself, never a chunk missing from one side.
+const RIM_CRATER: [char; 3] = ['▖', '▄', '▗'];
 
 /// Draw the candle: an organically curved, sub-cell wax shaft with a sagging melt
 /// crater and dynamic liquid wax runs. Returns the flame anchor `(x, y, brightness)`
@@ -707,11 +842,10 @@ fn draw_candle(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) -> (f32
     // Holder / saucer (curved foot).
     buf_set_str_fg(buf, cx.saturating_sub(1), holder_y, "▟███▙", Color::Rgb(96, 78, 52));
 
-    // ── Wax shaft: organic curve + vertical gradient. The top row is the melt
-    //    crater (quadrant blocks); everything below it is solid, displaced body. ──
-    let bx_of = |row_y: u16| -> u16 {
-        (cx as i16 + shaft_offset(row_y)).max(area.x as i16) as u16
-    };
+    // ── Wax shaft: a straight, left-right symmetric 3-wide column with a vertical
+    //    gradient. The body is the same width at every height (no per-row horizontal
+    //    displacement) — the only irregularity is the melt crater on the top row and the
+    //    liquid wax runs below, never a notch out of one side. ──
     for i in 0..wax_rows {
         let row_y = wax_bottom.saturating_sub(i);
         let t_from_top = if wax_rows > 1 {
@@ -724,15 +858,14 @@ fn draw_candle(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) -> (f32
         } else {
             lerp_color(WAX_CRIMSON, PITCH, (t_from_top - 0.5) / 0.5)
         };
-        let bx = bx_of(row_y);
         if i == wax_rows - 1 {
-            // Asymmetrical sagging crater catching the flame's underlight.
+            // The melt crater — a symmetric dip at the top, lit by the flame above.
             let lip = lerp_color(wax_color, FLAME_WHITE, pulse * 0.35);
             for (k, ch) in RIM_CRATER.iter().enumerate() {
-                buf_set_fg(buf, bx + k as u16, row_y, *ch, lip);
+                buf_set_fg(buf, cx + k as u16, row_y, *ch, lip);
             }
         } else {
-            buf_set_str_fg(buf, bx, row_y, "███", wax_color);
+            buf_set_str_fg(buf, cx, row_y, "███", wax_color);
         }
     }
 
@@ -744,9 +877,10 @@ fn draw_candle(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) -> (f32
             let cycle = dest as u64 * drip.speed + 130; // ooze, then hold/harden
             let t = (state.frame_counter + drip.phase) % cycle;
 
-            // A permanent hardened deposit — the organic deformity left behind.
+            // A permanent hardened deposit — the organic deformity left behind. The runs
+            // descend straight down their lateral offset (the shaft itself is now straight).
             let dest_y = wax_top + dest;
-            let hard_x = (cx as i16 + drip.col_off + shaft_offset(dest_y)).max(area.x as i16) as u16;
+            let hard_x = (cx as i16 + drip.col_off).max(area.x as i16) as u16;
             buf_set_fg(buf, hard_x, dest_y, '▐', wax_hard);
 
             let descend = dest as u64 * drip.speed;
@@ -755,20 +889,18 @@ fn draw_candle(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) -> (f32
                 let head_row = (t / drip.speed) as u16;
                 let head_y = wax_top + head_row;
                 let trail_ch = if drip.col_off < 1 { '▌' } else if drip.col_off > 1 { '▐' } else { '█' };
+                let dx = (cx as i16 + drip.col_off).max(area.x as i16) as u16;
                 for r in 0..head_row {
                     let ry = wax_top + r;
-                    let tx = (cx as i16 + drip.col_off + shaft_offset(ry)).max(area.x as i16) as u16;
-                    buf_set_fg(buf, tx, ry, trail_ch, wax_hard);
+                    buf_set_fg(buf, dx, ry, trail_ch, wax_hard);
                 }
-                let hx = (cx as i16 + drip.col_off + shaft_offset(head_y)).max(area.x as i16) as u16;
-                buf_set_fg(buf, hx, head_y, '█', wax_run);
+                buf_set_fg(buf, dx, head_y, '█', wax_run);
             }
         }
     }
 
-    // Flame sits atop the curved rim — wick and flame follow the top displacement.
-    let top_off = shaft_offset(wax_top);
-    let fcx = (center as i16 + top_off).max(area.x as i16) as u16;
+    // Flame sits centred atop the (straight) shaft.
+    let fcx = center;
     let wick_y = wax_top.saturating_sub(1);
     let flame_body_y = wick_y.saturating_sub(1);
     let flame_tip_y = flame_body_y.saturating_sub(1);
@@ -937,5 +1069,51 @@ fn draw_ghost_jury(buf: &mut Buffer, area: Rect, state: &GlobalStateContext) {
         let eye_color = dim_to_pitch(eye_color, reveal);
         buf_set_fg(buf, gx + 3, eye_y, '○', eye_color);
         buf_set_fg(buf, gx + pw.saturating_sub(5), eye_y, '○', eye_color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bug 1 guard: the dossier text must word-wrap within the card's inner width and never
+    /// overflow the row budget — verified against the longest strings across ALL six acts
+    /// (Turing falls back to the same PAPERS set), at the narrow widths a small card hits.
+    #[test]
+    fn dossier_text_wraps_within_card_and_truncates() {
+        for paper in PAPERS {
+            for inner_w in [10usize, 14, 20, 28, 37] {
+                // Raw wrap never exceeds the width (no mid-word bleed past the frame).
+                for line in wrap_words(paper.subtitle, inner_w) {
+                    assert!(line.chars().count() <= inner_w, "subtitle line > {}", inner_w);
+                }
+                for line in wrap_words(paper.signature, inner_w) {
+                    assert!(line.chars().count() <= inner_w, "signature line > {}", inner_w);
+                }
+                // Row-budgeted dossier obeys both the width and the height cap.
+                for max_rows in [1usize, 2, 4, 8] {
+                    let lines = dossier_lines(paper, inner_w, max_rows);
+                    assert!(lines.len() <= max_rows, "row budget exceeded");
+                    for (s, _) in &lines {
+                        assert!(s.chars().count() <= inner_w, "clipped line > {}", inner_w);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every act maps to an OUTRO image filename (atmospheric scene, never the portrait).
+    #[test]
+    fn each_act_has_an_outro_image() {
+        for act in [
+            Act::Jacquard1804,
+            Act::Babbage1837,
+            Act::Lovelace1843,
+            Act::Boole1854,
+            Act::Shannon1937,
+            Act::Turing1936_1950,
+        ] {
+            assert!(outro_image_rel(act).ends_with("_outro.png"));
+        }
     }
 }
