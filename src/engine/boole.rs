@@ -610,11 +610,13 @@ pub fn handle_input(
                 puzzle.logic_grid[r][c] = puzzle.logic_grid[r][c].cycle();
                 audio.menu_confirm(); // heavy mechanical latch on each gate cycle
                 // Memory Echo, binary-locked: the thought of TRUE punches the left ear,
-                // FALSE the right — driven by the input bit under the cursor's lane.
+                // FALSE the right — driven by the input bit under the cursor's lane. The
+                // three takes per side rotate with the cursor for variety.
+                let take = ((r + c) % 3) + 1;
                 if puzzle.input_bits.get(c).copied().unwrap_or(0) == 1 {
-                    audio.play_whisper("whispers/boole_true.mp3", -0.80);
+                    audio.play_whisper(&format!("whispers/boole_left{}.mp3", take), -0.80);
                 } else {
-                    audio.play_whisper("whispers/boole_false.mp3", 0.80);
+                    audio.play_whisper(&format!("whispers/boole_right{}.mp3", take), 0.80);
                 }
             }
         }

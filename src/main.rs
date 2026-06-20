@@ -393,6 +393,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut turing_score_active = false;
     // Frames elapsed in the FinalCredits state — drives the closing typewriter roll.
     let mut credits_elapsed: u64 = 0;
+    // Rotates the 3 numbered whisper takes per side for the line-driven Memory Echoes.
+    let mut whisper_seq: u64 = 0;
     let mut prev_snapped = false;
     let mut prev_jammed = false;
     // Fractional-beat accumulator: each tick adds `bpm/3750` of a beat (62.5 fps × 60s);
@@ -803,7 +805,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(prefix) = act_whisper_prefix(state.current_act) {
                     let pan = audio.next_whisper_pan();
                     let side = if pan < 0.0 { "left" } else { "right" };
-                    audio.play_whisper(&format!("whispers/{}_{}.mp3", prefix, side), pan);
+                    let take = (whisper_seq % 3) + 1; // cycle the 3 takes per side
+                    whisper_seq = whisper_seq.wrapping_add(1);
+                    audio.play_whisper(&format!("whispers/{}_{}{}.mp3", prefix, side, take), pan);
                 }
             }
 

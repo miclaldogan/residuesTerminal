@@ -672,6 +672,20 @@ mod whisper_tests {
             }
         }
     }
+
+    #[test]
+    fn line_driven_act_whispers_exist_three_takes_per_side() {
+        let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
+        // Jacquard/Babbage/Lovelace/Boole/Shannon each ship 3 takes per ear.
+        for prefix in ["jacquard", "babbage", "lovelace", "boole", "shannon"] {
+            for side in ["left", "right"] {
+                for take in 1..=3 {
+                    let rel = format!("whispers/{}_{}{}.mp3", prefix, side, take);
+                    assert!(base.join(&rel).exists(), "missing whisper take: {}", rel);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
