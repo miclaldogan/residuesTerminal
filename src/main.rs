@@ -704,15 +704,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loop for the whole session. Idempotent + mute-guarded, so it is safe to
             // call every tick regardless of screen state.
             audio.ensure_ambient();
-            // Act VI gets its own score the moment the player is on the Turing workspace;
-            // every other context (menu, prelude, other acts, cinematics) plays the
-            // default. Switching here each tick keeps the transition crisp and reversible.
-            // The dedicated Act VI score latches on the moment the player reaches the
-            // Turing workspace and persists through the bitten-apple finale AND the black
-            // credits — it is only torn down (back to the default mix) at the main menu.
+            // The dedicated Act VI score latches on the instant the game enters Turing's
+            // intro cinematic, then persists — seamlessly looping — through the desk
+            // workspace, the bitten-apple outro, and the final black credits. It is only
+            // torn down (swapped back to the default mix) once the player is at the menu.
+            // The latch flips score state exactly once per side, so the swap never overlaps
+            // or stutters: the default is reaped before the Turing track starts.
             if state.screen_state == ScreenState::MainMenu {
                 turing_score_active = false;
-            } else if state.current_act == Act::Turing1936_1950 && state.screen_state.desk_visible() {
+            } else if matches!(state.screen_state, ScreenState::ActIntro { act_id: 6, .. })
+                || (state.current_act == Act::Turing1936_1950 && state.screen_state.desk_visible())
+            {
                 turing_score_active = true;
             }
             audio.set_act_music(turing_score_active);
