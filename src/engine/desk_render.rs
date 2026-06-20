@@ -39,14 +39,16 @@ struct PaperMeta {
 }
 
 const PAPERS: &[PaperMeta] = &[
-    PaperMeta { act: Act::Jacquard1804, title: "JACQUARD", year: "1804", punch: "24-COL / 80-ROW", signature: "J.M. Jacquard" },
-    PaperMeta { act: Act::Babbage1837,  title: "BABBAGE",  year: "1837", punch: "31-COL / 50-ROW", signature: "Charles Babbage" },
-    PaperMeta { act: Act::Lovelace1843, title: "LOVELACE", year: "1843", punch: "26-COL / 64-ROW", signature: "A. A. Lovelace" },
-    PaperMeta { act: Act::Boole1854,    title: "BOOLE",    year: "1854", punch: "02-COL / 16-ROW", signature: "George Boole" },
-    PaperMeta { act: Act::Shannon1937,  title: "SHANNON",  year: "1937", punch: "16-COL / 32-ROW", signature: "Claude E. Shannon" },
+    PaperMeta { act: Act::Jacquard1804,     title: "JACQUARD", year: "1804", punch: "24-COL / 80-ROW",   signature: "J.M. Jacquard" },
+    PaperMeta { act: Act::Babbage1837,      title: "BABBAGE",  year: "1837", punch: "31-COL / 50-ROW",   signature: "C. Babbage" },
+    PaperMeta { act: Act::Lovelace1843,     title: "LOVELACE", year: "1843", punch: "26-COL / 64-ROW",   signature: "A. A. Lovelace" },
+    PaperMeta { act: Act::Boole1854,        title: "BOOLE",    year: "1854", punch: "02-COL / 16-ROW",   signature: "G. Boole" },
+    PaperMeta { act: Act::Shannon1937,      title: "SHANNON",  year: "1937", punch: "16-COL / 32-ROW",   signature: "C. E. Shannon" },
+    PaperMeta { act: Act::Turing1936_1950,  title: "TURING",   year: "1954", punch: "01-HEAD / \u{221E}-TAPE", signature: "A. M. Turing" },
 ];
 
 fn paper_for(act: Act) -> &'static PaperMeta {
+    // Every act now has a reel; the fallback only guards a future, unseeded act.
     PAPERS.iter().find(|p| p.act == act).unwrap_or(&PAPERS[0])
 }
 
@@ -121,6 +123,52 @@ pub fn render_desk(f: &mut Frame, area: Rect, state: &GlobalStateContext) {
     // 4. Typewriter documentation, padded neatly inside the boundary
     let doc_y = area.y + 2 + CARD_TOTAL_H + 1;
     draw_document(buf, inner_x, doc_y, inner_w, paper, solved);
+
+    // 5. Mini candle life-line indicator (if there is vertical room beneath the doc).
+    let doc_h: u16 = 9; // top + 5 body + sep + auth + bottom
+    let candle_y = doc_y + doc_h + 1;
+    if candle_y + 1 < area.y + area.height.saturating_sub(1) {
+        draw_candle_gauge(buf, inner_x, candle_y, inner_w, state.candle_pct(), state.frame_counter);
+    }
+}
+
+/// A compact two-row candle life-line: a flickering wick over a fill bar that drains as
+/// the chapters burn down (100% → 5%). At the critical end it gutters on and off.
+fn draw_candle_gauge(buf: &mut Buffer, ox: u16, y: u16, w: u16, pct: u32, frame: u64) {
+    if w < 14 {
+        return; // not enough horizontal room for the label + bar + percentage
+    }
+    let critical = pct <= 10;
+    let fill_col = if pct < 25 { Color::Rgb(255, 90, 40) } else { AMBER };
+    let flame_warm = Color::Rgb(255, 150, 50);
+
+    // Row 1 — label + a small flickering flame (which sputters out and back at criticality).
+    put_str(buf, ox, y, "CANDLE", LABEL, PITCH);
+    let lit = !critical || (frame / 6) % 2 == 0;
+    if lit {
+        let flame = match (frame / 7) % 3 {
+            0 => '\u{0028}', // (
+            1 => '\u{0029}', // )
+            _ => '\u{007C}', // |
+        };
+        put(buf, ox + 8, y, flame, flame_warm, PITCH);
+    }
+
+    // Row 2 — the draining fill bar with a percentage.
+    let bar_w: u16 = 8;
+    let filled = (pct as u16 * bar_w / 100).min(bar_w);
+    let by = y + 1;
+    put(buf, ox, by, '[', BORDER, PITCH);
+    for i in 0..bar_w {
+        let (ch, col) = if i < filled {
+            ('\u{2588}', fill_col)
+        } else {
+            ('\u{2591}', SHADE_LO)
+        };
+        put(buf, ox + 1 + i, by, ch, col, PITCH);
+    }
+    put(buf, ox + 1 + bar_w, by, ']', BORDER, PITCH);
+    put_str(buf, ox + bar_w + 3, by, &format!("{}%", pct), fill_col, PITCH);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

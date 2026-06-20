@@ -673,7 +673,8 @@ fn draw_system_deck(buf: &mut Buffer, x: u16, y: u16, width: u16, state: &Global
     buf_set_str(buf, x + 1, y, &clip(" SYSTEM DECK ", width.saturating_sub(2) as usize), Style::default().fg(HEADER_FG).bg(WS_BG));
 
     let inner = width.saturating_sub(2) as usize;
-    let candle_pct = (core_candle_pct(state)).round() as i32;
+    // Per-chapter life-line: 100% → 5% across the six acts (5% in Act VI = critical flicker).
+    let candle_pct = state.candle_pct() as i32;
     let metronome = if state.arrhythmia_multiplier > 0.0 { "ARRHYTHMIC" } else { "STEADY" };
     let stable = core.stabilised_count();
     let total = core.residues.len();
@@ -705,10 +706,6 @@ fn draw_system_deck(buf: &mut Buffer, x: u16, y: u16, width: u16, state: &Global
             gx += 2;
         }
     }
-}
-
-fn core_candle_pct(state: &GlobalStateContext) -> f32 {
-    (state.candle_rows_remaining as f32 / 120.0 * 100.0).clamp(0.0, 100.0)
 }
 
 impl TuringCore {

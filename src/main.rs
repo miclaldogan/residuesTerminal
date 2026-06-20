@@ -377,6 +377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Latches true once the player is on the Turing workspace; keeps its dedicated score
     // playing through the finale + credits, reset only at the menu.
     let mut turing_score_active = false;
+    // Frames elapsed in the FinalCredits state — drives the closing typewriter roll.
+    let mut credits_elapsed: u64 = 0;
     let mut prev_snapped = false;
     let mut prev_jammed = false;
     // Fractional-beat accumulator: each tick adds `bpm/3750` of a beat (62.5 fps × 60s);
@@ -441,7 +443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // ── The closing black credits screen. ──
                 ScreenState::FinalCredits => {
-                    cinematic::render_final_credits(f, size, state.frame_counter);
+                    cinematic::render_final_credits(f, size, state.frame_counter, credits_elapsed);
                 }
             }
         })?;
@@ -677,6 +679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // black credits screen (the Act VI score keeps
                                         // looping; it is only swapped back at the menu).
                                         state.screen_state = ScreenState::FinalCredits;
+                                        credits_elapsed = 0; // restart the typewriter roll
                                     } else {
                                         let next_id = cinematic::id_from_act(state.current_act);
                                         enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
@@ -808,8 +811,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ScreenState::ActOutro { act_id, text_index, timer } => {
                     state.screen_state = ScreenState::ActOutro { act_id, text_index, timer: timer.wrapping_add(1) };
                 }
-                // The credits simply breathe; the prompt blink is driven by the frame counter.
-                ScreenState::FinalCredits => {}
+                // The credits roll forward each tick — the typewriter consumes this clock.
+                ScreenState::FinalCredits => {
+                    credits_elapsed = credits_elapsed.wrapping_add(1);
+                }
                 // Phase 2: nothing advances; the world simply breathes and reveals.
                 ScreenState::AmbientDesk => {}
                 // Phase 3: the live simulation runs.

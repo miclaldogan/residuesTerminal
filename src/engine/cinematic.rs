@@ -201,15 +201,40 @@ pub fn render_outro(
     awaiting_enter: bool,
 ) {
     let scene = outro(act_id);
-    // The bitten-apple finale (Act VI) lifts its image 5 rows clear of the dialogue box.
-    let img_gap = if act_id >= 6 { 5 } else { 0 };
+    // The bitten-apple finale (Act VI) hoists its image high into the centre-top, well
+    // clear of the bottom narrative box (a generous 12-row lift from the dialogue band).
+    let img_gap = if act_id >= 6 { 12 } else { 0 };
     render_scene(f, area, &scene, dialogue, frame, awaiting_enter, 0.16, img_gap);
 }
 
-/// The closing credits — a pitch-black viewport with the title/byline dead-centre and a
-/// softly blinking exit prompt at the foot. Shown after the bitten-apple finale, before
-/// the player drops back to the menu.
-pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64) {
+/// Frames per character for the credits typewriter — the same incremental cadence as the
+/// rest of the game's platen, applied to the closing roll.
+const CREDIT_FRAMES_PER_CHAR: u64 = 3;
+
+/// Centre a partially-revealed line: the prefix is laid out at the position the *full*
+/// line would occupy (so it settles dead-centre), with a blinking platen cursor while it
+/// is still the actively-streaming line. Returns `true` once fully revealed.
+fn stream_center(buf: &mut Buffer, area: Rect, y: u16, full: &str, budget: &mut usize, col: Color, frame: u64) -> bool {
+    let total = full.chars().count();
+    let shown = (*budget).min(total);
+    *budget = budget.saturating_sub(shown);
+    let x = area.x + area.width.saturating_sub(total as u16) / 2;
+    let mut s: String = full.chars().take(shown).collect();
+    let streaming = shown < total;
+    // Show the platen cursor only on the line that is actively streaming (it has begun
+    // but not finished) — lines not yet reached stay blank, not littered with cursors.
+    if streaming && shown > 0 && (frame / 8) % 2 == 0 {
+        s.push('\u{2588}');
+    }
+    let void = Color::Rgb(0, 0, 0);
+    put_str(buf, x, y, &s, col, void);
+    !streaming
+}
+
+/// The closing credits — a pitch-black viewport whose lines stream in character-by-
+/// character on the shared typewriter clock (`elapsed` frames since the state began).
+/// Once the roll has finished, a softly blinking exit prompt invites the player out.
+pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64) {
     let buf = f.buffer_mut();
     let void = Color::Rgb(0, 0, 0);
     for y in area.y..area.y + area.height {
@@ -221,17 +246,22 @@ pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64) {
         }
     }
 
-    // Centre block — desaturated retro grey.
-    let cy = area.y + area.height / 2;
-    put_center(buf, area, cy.saturating_sub(1), "RESIDUES \u{2014} An Engine of Residual Minds", Color::Rgb(150, 140, 120));
-    put_center(buf, area, cy + 1, "Developed by Iclal Dogan", Color::Rgb(110, 102, 86));
+    // A single character budget grows with the clock; each line consumes from it in order.
+    let mut budget = (elapsed / CREDIT_FRAMES_PER_CHAR) as usize;
 
-    // Foot — a quiet system epitaph and a blinking exit prompt.
+    let cy = area.y + area.height / 2;
+    let t_done = stream_center(buf, area, cy.saturating_sub(1), "RESIDUES \u{2014} An Engine of Residual Minds", &mut budget, Color::Rgb(150, 140, 120), frame);
+    let b_done = stream_center(buf, area, cy + 1, "Developed by Iclal Dogan", &mut budget, Color::Rgb(110, 102, 86), frame);
+
     let py = area.y + area.height.saturating_sub(3);
-    put_center(buf, area, py, "[SYSTEM]: Simulation terminated. Memory matrices permanently archived.", Color::Rgb(70, 66, 56));
-    let on = (frame / 24) % 2 == 0;
-    let prompt_col = if on { Color::Rgb(140, 130, 110) } else { Color::Rgb(58, 54, 46) };
-    put_center(buf, area, py + 1, "[ Press ENTER to exit the mind ]", prompt_col);
+    let s_done = stream_center(buf, area, py, "[SYSTEM]: Simulation terminated. Memory matrices permanently archived.", &mut budget, Color::Rgb(70, 66, 56), frame);
+
+    // The exit prompt only blinks in once the whole roll has finished streaming.
+    if t_done && b_done && s_done {
+        let on = (frame / 24) % 2 == 0;
+        let prompt_col = if on { Color::Rgb(140, 130, 110) } else { Color::Rgb(58, 54, 46) };
+        put_center(buf, area, py + 1, "[ Press ENTER to exit the mind ]", prompt_col);
+    }
 }
 
 fn render_scene(
