@@ -55,11 +55,20 @@ fn act_intro(act: Act) -> (Speaker, &'static str, VoiceCue) {
 /// Enter the cinematic act-intro: warm-decode the portrait, flip the screen state, and
 /// begin streaming the figure's first biography line with its (async) voice cue. The
 /// portrait + narration are drawn by the half-block image engine from the next frame.
-fn enter_act_intro(state: &mut GlobalStateContext, dialogue: &mut DialogueEngine, act_id: u8) {
+fn enter_act_intro(
+    state: &mut GlobalStateContext,
+    dialogue: &mut DialogueEngine,
+    audio: &AudioEngine,
+    act_id: u8,
+) {
     cinematic::preload_intro(act_id);
     state.screen_state = ScreenState::ActIntro { act_id, text_index: 0, timer: 0 };
     let act = cinematic::act_from_id(act_id);
-    dialogue.play(Speaker::System, cinematic::intro(act_id).lines[0], Some(VoiceCue::ActIntro(act)));
+    // First biography line, synced to its `<act>_intro1.mp3` voice take: the typewriter
+    // is stretched to the audio length, and the cue fires the matching sample.
+    let cue = VoiceCue::ActIntroLine(act, 1);
+    let frames = audio.duration_frames(cue.marker());
+    dialogue.play_timed(Speaker::System, cinematic::intro(act_id).lines[0], Some(cue), frames);
 }
 
 /// Enter the cinematic act-outro (the tragedy of the act just cleared). Mirrors
@@ -543,7 +552,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Prelude complete → Act I's figure intro (Jacquard's
                                 // wide-cropped portrait), which then opens the ambient desk.
                                 audio.stop_voice_tracks();
-                                enter_act_intro(&mut state, &mut dialogue, 1);
+                                enter_act_intro(&mut state, &mut dialogue, &audio, 1);
                             }
                         }
                         // ── Phase 2: study in silence. ANY key (Esc already handled
@@ -608,11 +617,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) {
                                 let lines = cinematic::intro(act_id).lines;
                                 if text_index + 1 < lines.len() {
-                                    // Next press: advance to the next biography paragraph.
+                                    // Next press: advance to the next biography paragraph,
+                                    // synced to its own voice take (<act>_intro{n}.mp3).
                                     audio.stop_voice_tracks();
                                     let ni = text_index + 1;
                                     state.screen_state = ScreenState::ActIntro { act_id, text_index: ni, timer };
-                                    dialogue.play(Speaker::System, lines[ni], None);
+                                    let cue = VoiceCue::ActIntroLine(cinematic::act_from_id(act_id), (ni + 1) as u8);
+                                    let frames = audio.duration_frames(cue.marker());
+                                    dialogue.play_timed(Speaker::System, lines[ni], Some(cue), frames);
                                 } else {
                                     // Intro complete → onto that act's ambient desk.
                                     audio.stop_voice_tracks();
@@ -642,7 +654,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     audio.stop_voice_tracks();
                                     let next_id = cinematic::id_from_act(state.current_act);
-                                    enter_act_intro(&mut state, &mut dialogue, next_id);
+                                    enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
                                 }
                             }
                         }

@@ -101,6 +101,18 @@ fn marker_to_rel(marker: &str) -> Option<&'static str> {
         "VO_TURING_SPEECH_4" => "turing/turingSpeech4.mp3",
         "VO_TURING_SPEECH_5" => "turing/turingSpeech5Cough.mp3",
         "VO_TURING_SPEECH_6" => "turing/turingSpeech6.mp3",
+        // Cinematic act-intro biography takes — two spoken lines per act, synced to the
+        // typewriter. Turing has no take, so its markers fall through to `None` (silent).
+        "VO_INTRO_JACQUARD_1" => "speechs/jacquard_intro1.mp3",
+        "VO_INTRO_JACQUARD_2" => "speechs/jacquard_intro2.mp3",
+        "VO_INTRO_BABBAGE_1" => "speechs/babbage_intro1.mp3",
+        "VO_INTRO_BABBAGE_2" => "speechs/babbage_intro2.mp3",
+        "VO_INTRO_LOVELACE_1" => "speechs/lovelace_intro1.mp3",
+        "VO_INTRO_LOVELACE_2" => "speechs/lovelace_intro2.mp3",
+        "VO_INTRO_BOOLE_1" => "speechs/boole_intro1.mp3",
+        "VO_INTRO_BOOLE_2" => "speechs/boole_intro2.mp3",
+        "VO_INTRO_SHANNON_1" => "speechs/shannon_intro1.mp3",
+        "VO_INTRO_SHANNON_2" => "speechs/shannon_intro2.mp3",
         "SFX_DOOR_SLIDE" => "sfx/A_single,_isolated_s_#1-1781700210070.mp3",
         // Heavy interrogation bootstep — reuse the deep bump as a one-shot thud.
         "SFX_POLICE_BOOTSTEP" => "sfx/bump.mp3",
@@ -400,5 +412,34 @@ impl Drop for AudioEngine {
                 let _ = c.wait();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod intro_voice_tests {
+    use super::*;
+    use crate::engine::mind_log::VoiceCue;
+    use crate::engine::state::Act;
+
+    #[test]
+    fn act_intro_lines_resolve_to_existing_speech_files() {
+        let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
+        // Five acts have a two-line spoken intro; each cue must map to a real file.
+        let voiced = [
+            Act::Jacquard1804,
+            Act::Babbage1837,
+            Act::Lovelace1843,
+            Act::Boole1854,
+            Act::Shannon1937,
+        ];
+        for act in voiced {
+            for n in 1..=2u8 {
+                let marker = VoiceCue::ActIntroLine(act, n).marker();
+                let rel = marker_to_rel(marker).expect("intro line should map to a file");
+                assert!(base.join(rel).exists(), "missing speech asset: {}", rel);
+            }
+        }
+        // Turing has no take → no mapping, so the intro stays gracefully silent.
+        assert!(marker_to_rel(VoiceCue::ActIntroLine(Act::Turing1936_1950, 1).marker()).is_none());
     }
 }

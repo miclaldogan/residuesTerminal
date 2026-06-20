@@ -104,6 +104,9 @@ pub enum VoiceCue {
     /// The safe-door slide as the player crosses from the ambient desk into play.
     DoorSlide,
     ActIntro(Act),
+    /// A spoken biography line in the cinematic act intro: `(act, 1-based line number)`.
+    /// Resolves to `audio/speechs/<act>_intro<n>.mp3` (Turing has no take → silent).
+    ActIntroLine(Act, u8),
     JacquardTear,
     JacquardJam,
     BabbageCrunch,
@@ -131,6 +134,20 @@ impl VoiceCue {
             VoiceCue::ActIntro(Act::Boole1854) => "VO_ACT_BOOLE_INIT",
             VoiceCue::ActIntro(Act::Shannon1937) => "VO_ACT_SHANNON_INIT",
             VoiceCue::ActIntro(Act::Turing1936_1950) => "VO_ACT_TURING_INIT",
+            // Per-line cinematic intro voice takes (1 or 2). The line number is folded to
+            // "_1" / "_2" so any index past the second take reuses the second.
+            VoiceCue::ActIntroLine(Act::Jacquard1804, 1) => "VO_INTRO_JACQUARD_1",
+            VoiceCue::ActIntroLine(Act::Jacquard1804, _) => "VO_INTRO_JACQUARD_2",
+            VoiceCue::ActIntroLine(Act::Babbage1837, 1) => "VO_INTRO_BABBAGE_1",
+            VoiceCue::ActIntroLine(Act::Babbage1837, _) => "VO_INTRO_BABBAGE_2",
+            VoiceCue::ActIntroLine(Act::Lovelace1843, 1) => "VO_INTRO_LOVELACE_1",
+            VoiceCue::ActIntroLine(Act::Lovelace1843, _) => "VO_INTRO_LOVELACE_2",
+            VoiceCue::ActIntroLine(Act::Boole1854, 1) => "VO_INTRO_BOOLE_1",
+            VoiceCue::ActIntroLine(Act::Boole1854, _) => "VO_INTRO_BOOLE_2",
+            VoiceCue::ActIntroLine(Act::Shannon1937, 1) => "VO_INTRO_SHANNON_1",
+            VoiceCue::ActIntroLine(Act::Shannon1937, _) => "VO_INTRO_SHANNON_2",
+            VoiceCue::ActIntroLine(Act::Turing1936_1950, 1) => "VO_INTRO_TURING_1",
+            VoiceCue::ActIntroLine(Act::Turing1936_1950, _) => "VO_INTRO_TURING_2",
             VoiceCue::JacquardTear => "VO_JACQUARD_TEAR",
             VoiceCue::JacquardJam => "VO_JACQUARD_JAM",
             VoiceCue::BabbageCrunch => "VO_BABBAGE_CRUNCH",
@@ -357,6 +374,20 @@ impl DialogueEngine {
     pub fn play(&mut self, speaker: Speaker, text: &str, cue: Option<VoiceCue>) {
         let atoms = text.chars().map(Atom::Put).collect();
         self.start(speaker, atoms, cue, None);
+    }
+
+    /// Stream a plain string stretched so its keystrokes land across `target_frames`
+    /// (the cue's spoken length in 62.5 fps frames) — the typewriter-to-voice sync used
+    /// for the cinematic intro biography lines. `None` frames → default cadence.
+    pub fn play_timed(
+        &mut self,
+        speaker: Speaker,
+        text: &str,
+        cue: Option<VoiceCue>,
+        target_frames: Option<u32>,
+    ) {
+        let atoms = text.chars().map(Atom::Put).collect();
+        self.start(speaker, atoms, cue, target_frames);
     }
 
     /// Stream an authored beat script, stretched so its run ≈ `target_frames`
