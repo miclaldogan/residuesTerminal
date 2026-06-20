@@ -126,20 +126,6 @@ impl GlobalStateContext {
         }
     }
 
-    /// The candle's burning life-line as a whole percentage, scaled by chapter progress:
-    /// it gutters down one notch per act — 100% at the start, a critical 5% flicker by the
-    /// Turing endgame. Drives the SYSTEM DECK readout and the desk mini-candle indicator.
-    pub fn candle_pct(&self) -> u32 {
-        match self.current_act {
-            Act::Jacquard1804 => 100,
-            Act::Babbage1837 => 80,
-            Act::Lovelace1843 => 60,
-            Act::Boole1854 => 40,
-            Act::Shannon1937 => 20,
-            Act::Turing1936_1950 => 5,
-        }
-    }
-
     /// Real-time seconds elapsed inside the current act (since the last act change).
     pub fn act_seconds(&self) -> u64 {
         self.act_elapsed_ticks / TICKS_PER_SEC

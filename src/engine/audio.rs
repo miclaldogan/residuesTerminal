@@ -84,6 +84,10 @@ const HEARTBEAT_VOLUME: u8 = 62;
 const BACKSPACE_VOLUME: u8 = 88;
 const GLITCH_VOLUME: u8 = 92;
 const SPEECH_VOLUME: u8 = 100;
+/// VO soft-start: every spoken clip ramps from silence to full over this window so a
+/// voice never cracks in at maximum amplitude the instant a puzzle resolves. 400 ms is
+/// long enough to take the edge off the attack, short enough to stay in lockstep sync.
+const VO_FADE_IN_SECS: f32 = 0.4;
 const KEY_FALLBACK_VOLUME: u8 = 80;
 /// Cap on simultaneously-sounding clacks, so mashing a key can't pile detached players
 /// into an overlapping smear — extra strikes past this are dropped until some finish.
@@ -272,6 +276,26 @@ fn pan_gains(p: f32) -> (f32, f32) {
     (l, r)
 }
 
+/// Build the libavfilter chain for a spawned player: an optional hard-pan stage (binaural
+/// memory echoes) and an optional [`VO_FADE_IN_SECS`] fade-in (the VO soft-start). The two
+/// stages compose into one comma-joined graph; `None` when neither applies (a centred,
+/// full-amplitude play that needs no filter graph at all).
+fn build_filter_chain(pan: Option<f32>, fade_in: bool) -> Option<String> {
+    let mut filters: Vec<String> = Vec::new();
+    if let Some(p) = pan {
+        let (l, r) = pan_gains(p);
+        filters.push(format!("pan=stereo|c0={:.3}*c0|c1={:.3}*c0", l, r));
+    }
+    if fade_in {
+        filters.push(format!("afade=t=in:st=0:d={:.2}", VO_FADE_IN_SECS));
+    }
+    if filters.is_empty() {
+        None
+    } else {
+        Some(filters.join(","))
+    }
+}
+
 /// Fire a pre-trimmed WAV through low-latency `paplay`.
 fn play_paplay(wav: &str, volume: u32) -> Option<Child> {
     Command::new("paplay")
@@ -420,24 +444,23 @@ impl AudioEngine {
     }
 
     fn spawn(&self, rel: &str, looping: bool, volume: u8) -> Option<Child> {
-        self.spawn_panned(rel, looping, volume, None)
+        self.spawn_panned(rel, looping, volume, None, false)
     }
 
-    /// Spawn a detached player, optionally hard-panned via the player's audio filter.
-    /// `pan` is −1.0 (full left) .. +1.0 (full right); a stereo `pan` filter scales the
-    /// (first) channel into each output ear. mpg123 has no filter graph, so it ignores
-    /// the pan (plays centred) — a graceful, never-fatal degrade.
-    fn spawn_panned(&self, rel: &str, looping: bool, volume: u8, pan: Option<f32>) -> Option<Child> {
+    /// Spawn a detached player, optionally hard-panned and/or fade-in ramped via the
+    /// player's audio filter graph. `pan` is −1.0 (full left) .. +1.0 (full right); a
+    /// stereo `pan` filter scales the (first) channel into each output ear, and `fade_in`
+    /// prepends a [`VO_FADE_IN_SECS`] soft-start so a clip never slams in at full volume.
+    /// mpg123 has no filter graph, so it ignores both (plays centred, hard attack) — a
+    /// graceful, never-fatal degrade.
+    fn spawn_panned(&self, rel: &str, looping: bool, volume: u8, pan: Option<f32>, fade_in: bool) -> Option<Child> {
         if self.player == Player::None || self.muted {
             return None;
         }
         let path = self.base.join(rel);
-        // ffmpeg/libavfilter `pan` graph: split the source channel into both ears with
-        // the requested left/right gains, so a mono or stereo whisper lands hard on one side.
-        let pan_graph = pan.map(|p| {
-            let (l, r) = pan_gains(p);
-            format!("pan=stereo|c0={:.3}*c0|c1={:.3}*c0", l, r)
-        });
+        // ffmpeg/libavfilter graph: an optional hard-pan (whisper lands on one ear) chained
+        // with an optional 400 ms fade-in (VO soft-start) — see `build_filter_chain`.
+        let filter = build_filter_chain(pan, fade_in);
         let mut cmd = match self.player {
             Player::Mpv => {
                 let mut c = Command::new("mpv");
@@ -445,7 +468,7 @@ impl AudioEngine {
                     .arg("--really-quiet")
                     .arg("--no-video")
                     .arg(format!("--volume={}", volume));
-                if let Some(g) = &pan_graph {
+                if let Some(g) = &filter {
                     c.arg(format!("--af=lavfi=[{}]", g));
                 }
                 if looping {
@@ -462,7 +485,7 @@ impl AudioEngine {
                     .arg("quiet")
                     .arg("-volume")
                     .arg(volume.to_string());
-                if let Some(g) = &pan_graph {
+                if let Some(g) = &filter {
                     c.arg("-af").arg(g);
                 }
                 if looping {
@@ -523,7 +546,7 @@ impl AudioEngine {
             return;
         }
         Self::reap(&mut self.whisper);
-        self.whisper = self.spawn_panned(rel, false, WHISPER_VOLUME, Some(pan));
+        self.whisper = self.spawn_panned(rel, false, WHISPER_VOLUME, Some(pan), false);
     }
 
     /// Instantly cut the active whisper (the pacing guard: when the player skips a line
@@ -533,11 +556,13 @@ impl AudioEngine {
     }
 
     /// Fire a one-shot cue (a Turing speech line, the door slide, a bootstep). Any
-    /// speech still playing is cut so lines never pile up on top of each other.
+    /// speech still playing is cut so lines never pile up on top of each other, and the
+    /// new clip is spawned with the [`VO_FADE_IN_SECS`] soft-start so a voiceover that
+    /// triggers the instant a puzzle resolves ramps up cleanly instead of spiking the mix.
     pub fn play_marker(&mut self, marker: &str) {
         if let Some(rel) = marker_to_rel(marker) {
             Self::reap(&mut self.speech);
-            self.speech = self.spawn(rel, false, SPEECH_VOLUME);
+            self.speech = self.spawn_panned(rel, false, SPEECH_VOLUME, None, true);
         }
     }
 
@@ -633,6 +658,12 @@ impl AudioEngine {
         self.heartbeat = self.spawn(SFX_HEARTBEAT, false, HEARTBEAT_VOLUME);
     }
 
+    /// Cut the heartbeat metronome to silence immediately. Called the instant the finale's
+    /// SYSTEM HALTED registers, so no stray beat keeps thumping over the dead terminal.
+    pub fn stop_heartbeat(&mut self) {
+        Self::reap(&mut self.heartbeat);
+    }
+
     /// Spawn a pooled one-shot SFX, reaping any finished siblings first.
     fn fire_oneshot(&mut self, rel: &str, volume: u8) {
         self.sfx.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
@@ -673,6 +704,22 @@ mod whisper_tests {
         // Hard extremes clamp cleanly into [0, 1].
         assert_eq!(pan_gains(-1.0), (1.0, 0.0));
         assert_eq!(pan_gains(1.0), (0.0, 1.0));
+    }
+
+    #[test]
+    fn filter_chain_composes_pan_and_vo_fade() {
+        // Neither stage → no graph at all (centred, full-amplitude play).
+        assert!(build_filter_chain(None, false).is_none());
+        // Fade-only → just the VO soft-start ramp.
+        let f = build_filter_chain(None, true).expect("fade graph");
+        assert!(f.contains("afade=t=in") && !f.contains("pan="), "fade-only: {}", f);
+        // Pan-only → just the binaural hard-pan, no fade.
+        let p = build_filter_chain(Some(PAN_LEFT), false).expect("pan graph");
+        assert!(p.contains("pan=stereo") && !p.contains("afade"), "pan-only: {}", p);
+        // Both → pan first, then fade, comma-chained into one graph.
+        let both = build_filter_chain(Some(PAN_RIGHT), true).expect("combined graph");
+        assert!(both.starts_with("pan=stereo"), "pan leads: {}", both);
+        assert!(both.contains(",afade=t=in"), "fade chained after pan: {}", both);
     }
 
     #[test]

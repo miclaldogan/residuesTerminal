@@ -522,6 +522,24 @@ impl DialogueEngine {
         s
     }
 
+    /// Quiet the platen to an empty, inactive state: no visible text, no pending cue, no
+    /// line-start/skip flags. Used to hold a cinematic's portrait in silence during the
+    /// 0.8 s breathing-room pre-roll, before its first narration line is engaged — so no
+    /// stale puzzle text bleeds onto the portrait and no premature ENTER prompt appears.
+    pub fn clear(&mut self) {
+        self.atoms.clear();
+        self.idx = 0;
+        self.displayed.clear();
+        self.timer = 0;
+        self.scale = 1.0;
+        self.keystroke = false;
+        self.pending_cue = None;
+        self.active = false;
+        self.done = true;
+        self.line_started = false;
+        self.skipped = false;
+    }
+
     /// Reveal the whole line immediately (used when the user taps a key to skip).
     pub fn skip(&mut self) {
         if !self.done {

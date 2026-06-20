@@ -561,8 +561,8 @@ pub fn render_workspace(
     }
 
     // ── System Deck dossier. ──
-    if deck_y + 7 <= y0 + h.saturating_sub(1) {
-        draw_system_deck(buf, inner_x, deck_y, inner_w.min(30), state, core);
+    if deck_y + 5 <= y0 + h.saturating_sub(1) {
+        draw_system_deck(buf, inner_x, deck_y, inner_w.min(30), core);
     }
 
     if let Some((msg, kind)) = core.status_log.last() {
@@ -663,8 +663,12 @@ fn draw_tape(buf: &mut Buffer, x: u16, y: u16, width: u16, core: &TuringCore, fr
     let _ = head_cols;
 }
 
-fn draw_system_deck(buf: &mut Buffer, x: u16, y: u16, width: u16, state: &GlobalStateContext, core: &TuringCore) {
-    let h: u16 = 8;
+/// The centre System Deck dossier. Deliberately puzzle-focused: STATE / GLYPHS / RESIDUES
+/// plus the per-act stabilisation tracker. The candle life-line and the heartbeat metronome
+/// are NOT repeated here — they already live on the right-column desk and the bottom
+/// telemetry bar respectively, so the player isn't shown the same gauge twice.
+fn draw_system_deck(buf: &mut Buffer, x: u16, y: u16, width: u16, core: &TuringCore) {
+    let h: u16 = 6;
     let rect = Rect::new(x, y, width, h);
     // Fill the dossier interior so the blueprint grid doesn't bleed through the text.
     for fy in y..y + h {
@@ -676,17 +680,12 @@ fn draw_system_deck(buf: &mut Buffer, x: u16, y: u16, width: u16, state: &Global
     buf_set_str(buf, x + 1, y, &clip(" SYSTEM DECK ", width.saturating_sub(2) as usize), Style::default().fg(HEADER_FG).bg(WS_BG));
 
     let inner = width.saturating_sub(2) as usize;
-    // Per-chapter life-line: 100% → 5% across the six acts (5% in Act VI = critical flicker).
-    let candle_pct = state.candle_pct() as i32;
-    let metronome = if state.arrhythmia_multiplier > 0.0 { "ARRHYTHMIC" } else { "STEADY" };
     let stable = core.stabilised_count();
     let total = core.residues.len();
 
-    let rows: [(String, Color); 5] = [
+    let rows: [(String, Color); 3] = [
         (format!("STATE   : {}", state_name(core.current_state)), if core.current_state == State::Halt { OK_FG } else { TEXT_FG }),
         (format!("GLYPHS  : {}", core.infinite_tape.len()), TEXT_FG),
-        (format!("CANDLE  : {}%", candle_pct.max(0)), if candle_pct < 25 { FAIL_FG } else { TEXT_FG }),
-        (format!("METRONOME: {} {}", state.base_heartbeat_bpm, metronome), if metronome == "ARRHYTHMIC" { FAIL_FG } else { TEXT_FG }),
         (format!("RESIDUES: {}/{} stable", stable, total), if stable == total { OK_FG } else { CORRUPT_FG }),
     ];
     let mut ry = y + 1;

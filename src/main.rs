@@ -32,6 +32,12 @@ use crate::engine::turing;
 /// Frames the prelude holds between monologue lines (~0.6 s breath at the 16ms tick).
 const LINE_GAP: u16 = 40;
 
+/// Cinematic breathing room: when a puzzle resolves into an act intro/outro, the portrait
+/// holds in quiet anticipation for this many frames (~0.8 s at the 16 ms tick) before the
+/// background music ducks and the first narration line + its voiceover cascade open. Lets
+/// the finished screen land for a beat instead of slamming straight into the dialogue.
+const CINEMATIC_PREROLL: u64 = 50;
+
 /// The voice-over that plays the instant an act is taken up. Returns the speaker,
 /// the line, and the deterministic sound cue. Never leaks numeric solutions.
 fn act_intro(act: Act) -> (Speaker, &'static str, VoiceCue) {
@@ -52,23 +58,42 @@ fn act_intro(act: Act) -> (Speaker, &'static str, VoiceCue) {
     (Speaker::Turing, text, VoiceCue::ActIntro(act))
 }
 
-/// Enter the cinematic act-intro: warm-decode the portrait, flip the screen state, and
-/// begin streaming the figure's first biography line with its (async) voice cue. The
-/// portrait + narration are drawn by the half-block image engine from the next frame.
+/// Enter the cinematic act-intro: cut any active memory-echo whisper (it must never bleed
+/// into a voiced cinematic), warm-decode the portrait, and flip the screen state into its
+/// breathing-room pre-roll. The portrait is drawn by the half-block image engine from the
+/// next frame; the first biography line + its voice take are engaged by the tick scheduler
+/// once the [`CINEMATIC_PREROLL`] hold elapses (see [`start_cinematic_line`]).
 fn enter_act_intro(
     state: &mut GlobalStateContext,
     dialogue: &mut DialogueEngine,
-    audio: &AudioEngine,
+    audio: &mut AudioEngine,
     act_id: u8,
 ) {
+    audio.stop_whisper(); // a cinematic layer claims the screen — silence the echo instantly
     cinematic::preload_intro(act_id);
+    dialogue.clear(); // hold the portrait in silence through the pre-roll (no stale text)
     state.screen_state = ScreenState::ActIntro { act_id, text_index: 0, timer: 0 };
+}
+
+/// Engage one cinematic narration line (intro or outro), synced to its `<act>_<phase><n>.mp3`
+/// voice take: the typewriter is stretched to the audio length, and the cue fires the
+/// matching sample. `line_index` is 0-based; the voice take number is `line_index + 1`.
+fn start_cinematic_line(
+    dialogue: &mut DialogueEngine,
+    audio: &AudioEngine,
+    act_id: u8,
+    is_outro: bool,
+    line_index: usize,
+) {
     let act = cinematic::act_from_id(act_id);
-    // First biography line, synced to its `<act>_intro1.mp3` voice take: the typewriter
-    // is stretched to the audio length, and the cue fires the matching sample.
-    let cue = VoiceCue::ActIntroLine(act, 1);
+    let take = (line_index + 1) as u8;
+    let (line, cue) = if is_outro {
+        (cinematic::outro(act_id).lines[line_index], VoiceCue::ActOutroLine(act, take))
+    } else {
+        (cinematic::intro(act_id).lines[line_index], VoiceCue::ActIntroLine(act, take))
+    };
     let frames = audio.duration_frames(cue.marker());
-    dialogue.play_timed(Speaker::System, cinematic::intro(act_id).lines[0], Some(cue), frames);
+    dialogue.play_timed(Speaker::System, line, Some(cue), frames);
 }
 
 /// The whisper-asset prefix for the acts whose Memory Echoes fire on each narrative line
@@ -86,21 +111,20 @@ fn act_whisper_prefix(act: Act) -> Option<&'static str> {
 }
 
 /// Enter the cinematic act-outro (the tragedy of the act just cleared). Mirrors
-/// [`enter_act_intro`]: the first outro line is synced to its `<act>_outro1.mp3` voice
-/// take (typewriter stretched to the audio length). Turing's outro has no take, so it
+/// [`enter_act_intro`]: silence any active whisper, hold the portrait through the
+/// breathing-room pre-roll, then let the tick scheduler engage the first outro line
+/// (synced to its `<act>_outro1.mp3` voice take). Turing's outro has no take, so it
 /// streams silent at the default cadence.
 fn enter_act_outro(
     state: &mut GlobalStateContext,
     dialogue: &mut DialogueEngine,
-    audio: &AudioEngine,
+    audio: &mut AudioEngine,
     act_id: u8,
 ) {
+    audio.stop_whisper(); // a cinematic layer claims the screen — silence the echo instantly
     cinematic::preload_outro(act_id);
+    dialogue.clear(); // hold the portrait in silence through the pre-roll (no stale text)
     state.screen_state = ScreenState::ActOutro { act_id, text_index: 0, timer: 0 };
-    let act = cinematic::act_from_id(act_id);
-    let cue = VoiceCue::ActOutroLine(act, 1);
-    let frames = audio.duration_frames(cue.marker());
-    dialogue.play_timed(Speaker::System, cinematic::outro(act_id).lines[0], Some(cue), frames);
 }
 
 fn draw_top_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &GlobalStateContext) {
@@ -459,12 +483,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // ── Cinematic: portrait + biography (intro) or downfall (outro),
                 //    drawn full-frame by the half-block pixel-art engine. ──
-                ScreenState::ActIntro { act_id, .. } => {
-                    let awaiting = !dialogue.is_typing();
+                ScreenState::ActIntro { act_id, text_index, .. } => {
+                    // During the breathing-room pre-roll the dialogue is cleared (inactive),
+                    // so the portrait holds with no narration and no premature ENTER prompt.
+                    let preroll = text_index == 0 && !dialogue.is_active();
+                    let awaiting = !preroll && !dialogue.is_typing();
                     cinematic::render_intro(f, size, act_id, &dialogue, state.frame_counter, awaiting);
                 }
-                ScreenState::ActOutro { act_id, .. } => {
-                    let awaiting = !dialogue.is_typing();
+                ScreenState::ActOutro { act_id, text_index, .. } => {
+                    let preroll = text_index == 0 && !dialogue.is_active();
+                    let awaiting = !preroll && !dialogue.is_typing();
                     cinematic::render_outro(f, size, act_id, &dialogue, state.frame_counter, awaiting);
                 }
                 // ── The closing black credits screen. ──
@@ -599,7 +627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Prelude complete → Act I's figure intro (Jacquard's
                                 // wide-cropped portrait), which then opens the ambient desk.
                                 audio.stop_voice_tracks();
-                                enter_act_intro(&mut state, &mut dialogue, &audio, 1);
+                                enter_act_intro(&mut state, &mut dialogue, &mut audio, 1);
                             }
                         }
                         // ── Phase 2: study in silence. ANY key (Esc already handled
@@ -657,7 +685,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ── Cinematic intro: a key skips the typewriter; ENTER/Space
                         //    pages through the biography, then crosses into the act. ──
                         ScreenState::ActIntro { act_id, text_index, timer } => {
-                            if dialogue.is_typing() {
+                            // Mandatory breathing room: while the portrait still holds in
+                            // the pre-roll (dialogue cleared → inactive), swallow input so
+                            // the first line is never skipped before the cascade opens.
+                            if text_index == 0 && !dialogue.is_active() {
+                                // hold — ignore the key
+                            } else if dialogue.is_typing() {
                                 // First press: flush the line in full and cut its voice.
                                 audio.stop_voice_tracks();
                                 dialogue.skip();
@@ -669,9 +702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     audio.stop_voice_tracks();
                                     let ni = text_index + 1;
                                     state.screen_state = ScreenState::ActIntro { act_id, text_index: ni, timer };
-                                    let cue = VoiceCue::ActIntroLine(cinematic::act_from_id(act_id), (ni + 1) as u8);
-                                    let frames = audio.duration_frames(cue.marker());
-                                    dialogue.play_timed(Speaker::System, lines[ni], Some(cue), frames);
+                                    start_cinematic_line(&mut dialogue, &audio, act_id, false, ni);
                                 } else {
                                     // Intro complete → onto that act's ambient desk.
                                     audio.stop_voice_tracks();
@@ -688,7 +719,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ── Cinematic outro: page through the downfall, then hand off to
                         //    the next act's intro (current_act has already advanced). ──
                         ScreenState::ActOutro { act_id, text_index, timer } => {
-                            if dialogue.is_typing() {
+                            // Mandatory breathing room: swallow input while the portrait
+                            // still holds in the pre-roll (dialogue cleared → inactive).
+                            if text_index == 0 && !dialogue.is_active() {
+                                // hold — ignore the key
+                            } else if dialogue.is_typing() {
                                 audio.stop_voice_tracks();
                                 dialogue.skip();
                             } else if matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) {
@@ -698,28 +733,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let ni = text_index + 1;
                                     state.screen_state = ScreenState::ActOutro { act_id, text_index: ni, timer };
                                     // Next outro line, synced to its own voice take.
-                                    let cue = VoiceCue::ActOutroLine(cinematic::act_from_id(act_id), (ni + 1) as u8);
-                                    let frames = audio.duration_frames(cue.marker());
-                                    dialogue.play_timed(Speaker::System, lines[ni], Some(cue), frames);
+                                    start_cinematic_line(&mut dialogue, &audio, act_id, true, ni);
                                 } else {
                                     audio.stop_voice_tracks();
                                     if act_id >= 6 {
                                         // The bitten-apple finale just ended — break into the
                                         // black credits screen (the Act VI score keeps
                                         // looping; it is only swapped back at the menu).
+                                        // Cut the heartbeat metronome dead the instant the
+                                        // SYSTEM HALTED teardown registers.
+                                        audio.stop_heartbeat();
                                         state.screen_state = ScreenState::FinalCredits;
-                                        credits_elapsed = 0; // restart the typewriter roll
+                                        credits_elapsed = 0; // restart the teardown clock
                                     } else {
                                         let next_id = cinematic::id_from_act(state.current_act);
-                                        enter_act_intro(&mut state, &mut dialogue, &audio, next_id);
+                                        enter_act_intro(&mut state, &mut dialogue, &mut audio, next_id);
                                     }
                                 }
                             }
                         }
-                        // ── Black credits: ENTER flushes the run and returns to the menu,
-                        //    where the dedicated score swaps back to the default mix. ──
+                        // ── Black credits: the teardown is unskippable (spec §8) — ENTER is
+                        //    ignored until the whole FATAL ERROR → waterfall → apple →
+                        //    syllogism → pardon sequence has fully played out. Only then does
+                        //    it flush the run and return to the menu (default score restored). ──
                         ScreenState::FinalCredits => {
-                            if key.code == KeyCode::Enter {
+                            if key.code == KeyCode::Enter
+                                && credits_elapsed >= cinematic::credits_exit_frame()
+                            {
                                 audio.stop_voice_tracks();
                                 // Reset every puzzle so a replay starts clean.
                                 jacquard_puzzle = JacquardPuzzle::new();
@@ -853,10 +893,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Cinematic: the world is frozen; only the per-state timer advances
                 // (the typewriter line is driven by `dialogue.tick()` above).
                 ScreenState::ActIntro { act_id, text_index, timer } => {
-                    state.screen_state = ScreenState::ActIntro { act_id, text_index, timer: timer.wrapping_add(1) };
+                    let nt = timer.wrapping_add(1);
+                    state.screen_state = ScreenState::ActIntro { act_id, text_index, timer: nt };
+                    // Breathing room elapsed → open the dialogue cascade: engage the first
+                    // biography line + its voice take (fires exactly once, while still held).
+                    if text_index == 0 && nt == CINEMATIC_PREROLL && !dialogue.is_active() {
+                        start_cinematic_line(&mut dialogue, &audio, act_id, false, 0);
+                    }
                 }
                 ScreenState::ActOutro { act_id, text_index, timer } => {
-                    state.screen_state = ScreenState::ActOutro { act_id, text_index, timer: timer.wrapping_add(1) };
+                    let nt = timer.wrapping_add(1);
+                    state.screen_state = ScreenState::ActOutro { act_id, text_index, timer: nt };
+                    if text_index == 0 && nt == CINEMATIC_PREROLL && !dialogue.is_active() {
+                        start_cinematic_line(&mut dialogue, &audio, act_id, true, 0);
+                    }
                 }
                 // The credits roll forward each tick — the typewriter consumes this clock.
                 ScreenState::FinalCredits => {
@@ -891,7 +941,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current_act: furthest_act,
                             acts_completed: state.acts_completed.clone(),
                         });
-                        enter_act_outro(&mut state, &mut dialogue, &audio, cinematic::id_from_act(completed));
+                        enter_act_outro(&mut state, &mut dialogue, &mut audio, cinematic::id_from_act(completed));
                     }
 
                     // ── Endgame: Turing is the final act, so its win never advances
@@ -908,8 +958,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current_act: furthest_act,
                             acts_completed: state.acts_completed.clone(),
                         });
-                        audio.stop_whisper(); // no lingering echo into the apple finale
-                        enter_act_outro(&mut state, &mut dialogue, &audio, cinematic::id_from_act(Act::Turing1936_1950));
+                        // enter_act_outro silences any lingering echo before the apple finale.
+                        enter_act_outro(&mut state, &mut dialogue, &mut audio, cinematic::id_from_act(Act::Turing1936_1950));
                     }
 
                     // Jacquard failure voice hooks (rising-edge detection).

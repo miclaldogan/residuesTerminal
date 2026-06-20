@@ -121,24 +121,24 @@ pub fn outro(act_id: u8) -> Scene {
             title: "\u{2014} THE LOOM REMEMBERS \u{2014}",
             image_rel: "jacquard_outro.png",
             lines: &[
-                "They smashed his looms in the streets of Lyon, terrified of a machine that could remember. Joseph died in isolation, forgotten by the very hands he tried to liberate.",
-                "They didn't understand... once the thread of logic is spun, you cannot unweave it. The residue remains.",
+                "The riots faded; the cards endured. Within a generation, Jacquard's looms clothed half of Europe.",
+                "He died honoured \u{2014} yet never grasped that his holes in card had taught mankind to program a machine.",
             ],
         },
         2 => Scene {
             title: "\u{2014} THE UNFINISHED ENGINE \u{2014}",
             image_rel: "babbage_outro.png",
             lines: &[
-                "The British Crown withdrew the gold. Charles died embittered, leaving his masterpiece a heap of cold brass \u{2014} a ghost born a century before its time.",
-                "They called him a madman. I know how it feels... to build a cathedral of thought, only to be left rotting in its shadow.",
+                "The government withdrew its funding. The great engine was never completed in his lifetime.",
+                "Babbage died embittered, his masterpiece a heap of precise brass \u{2014} a mind a century ahead of its tools.",
             ],
         },
         3 => Scene {
             title: "\u{2014} ENCHANTRESS OF NUMBERS \u{2014}",
             image_rel: "lovelace_outro.png",
             lines: &[
-                "Cancer took her at thirty-six. Her notes gathered dust, dismissed as a poet's daughter's dream. A hundred years would pass before the world understood that she had already written the first line of the future.",
-                "Blood and numbers... both fade so quickly.",
+                "Cancer took Ada at thirty-six. Her notes gathered dust, dismissed as a poet's daydream.",
+                "A hundred years would pass before the world understood she had written the first program of all.",
             ],
         },
         4 => Scene {
@@ -231,9 +231,58 @@ fn stream_center(buf: &mut Buffer, area: Rect, y: u16, full: &str, budget: &mut 
     !streaming
 }
 
-/// The closing credits — a pitch-black viewport whose lines stream in character-by-
-/// character on the shared typewriter clock (`elapsed` frames since the state began).
-/// Once the roll has finished, a softly blinking exit prompt invites the player out.
+// ── Finale timing (frames @ ~62.5 fps). ──
+const HALT_HOLD: u64 = 100;     // "FATAL ERROR: SYSTEM HALTED" frozen, in silence
+const WATERFALL_DUR: u64 = 240; // the binary cascade draining to black
+const APPLE_HOLD: u64 = 70;     // the apple alone before the syllogism types
+const PHASE_GAP: u64 = 100;     // a held beat between movements
+
+/// The 1952 letter to Norman Routledge — the structural syllogism.
+const SYLLOGISM: &[&str] = &[
+    "Turing believes machines think.",
+    "Turing lies with men.",
+    "Therefore, machines do not think.",
+    "",
+    "\u{2014} Alan Turing, letter to Norman Routledge, 1952",
+];
+
+/// The administrative seal.
+const PARDON: &[&str] = &[
+    "2013  \u{2014}  Royal Pardon.",
+    "It took fifty-nine years to apologize.",
+];
+
+/// A tiny inline LCG for the deterministic-per-cell waterfall (no deps, no state).
+fn cell_rng(x: u16, y: u16, t: u64) -> u64 {
+    let mut s = (x as u64)
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add((y as u64).wrapping_mul(0xC2B2AE3D27D4EB4F))
+        .wrapping_add(t);
+    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    s
+}
+
+/// Total characters in a block (for deriving when a streamed block is done).
+fn block_chars(lines: &[&str]) -> usize {
+    lines.iter().map(|l| l.chars().count()).sum()
+}
+
+/// The frame (since FinalCredits began) at which the whole teardown has played out and the
+/// player is finally allowed to leave. The finale is unskippable per spec §8, so the main
+/// loop gates the ENTER key against this. Derived purely from the phase constants.
+pub fn credits_exit_frame() -> u64 {
+    let w_end = HALT_HOLD + WATERFALL_DUR;
+    let syll_start = w_end + APPLE_HOLD;
+    let syll_done = syll_start + block_chars(SYLLOGISM) as u64 * CREDIT_FRAMES_PER_CHAR;
+    let pardon_start = syll_done + PHASE_GAP;
+    let pardon_done = pardon_start + block_chars(PARDON) as u64 * CREDIT_FRAMES_PER_CHAR;
+    pardon_done + PHASE_GAP
+}
+
+/// The closing teardown, hardcoded and unskippable per spec §8 (the metronome is cut to
+/// silence in the audio layer the instant this state is entered). Driven by `elapsed`
+/// frames since FinalCredits began:
+///   FATAL ERROR → binary waterfall → centred apple → 1952 syllogism → 2013 pardon → exit.
 pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64) {
     let buf = f.buffer_mut();
     let void = Color::Rgb(0, 0, 0);
@@ -246,21 +295,114 @@ pub fn render_final_credits(f: &mut Frame, area: Rect, frame: u64, elapsed: u64)
         }
     }
 
-    // A single character budget grows with the clock; each line consumes from it in order.
-    let mut budget = (elapsed / CREDIT_FRAMES_PER_CHAR) as usize;
-
     let cy = area.y + area.height / 2;
-    let t_done = stream_center(buf, area, cy.saturating_sub(1), "RESIDUES \u{2014} An Engine of Residual Minds", &mut budget, Color::Rgb(150, 140, 120), frame);
-    let b_done = stream_center(buf, area, cy + 1, "Developed by Iclal Dogan", &mut budget, Color::Rgb(110, 102, 86), frame);
 
-    let py = area.y + area.height.saturating_sub(3);
-    let s_done = stream_center(buf, area, py, "[SYSTEM]: Simulation terminated. Memory matrices permanently archived.", &mut budget, Color::Rgb(70, 66, 56), frame);
+    // ── Phase 1 — the frozen halt. ──
+    if elapsed < HALT_HOLD {
+        let blink = (frame / 12) % 2 == 0;
+        let col = if blink { Color::Rgb(255, 70, 40) } else { Color::Rgb(120, 30, 15) };
+        put_center(buf, area, cy, "FATAL ERROR: SYSTEM HALTED", col);
+        return;
+    }
 
-    // The exit prompt only blinks in once the whole roll has finished streaming.
-    if t_done && b_done && s_done {
-        let on = (frame / 24) % 2 == 0;
-        let prompt_col = if on { Color::Rgb(140, 130, 110) } else { Color::Rgb(58, 54, 46) };
-        put_center(buf, area, py + 1, "[ Press ENTER to exit the mind ]", prompt_col);
+    // ── Phase 2 — the binary waterfall: every cell mutates into a downward stream of
+    //    1s and 0s, draining to black column by column. ──
+    let w_start = HALT_HOLD;
+    let w_end = HALT_HOLD + WATERFALL_DUR;
+    if elapsed < w_end {
+        let local = elapsed - w_start;
+        for x in area.x..area.x + area.width {
+            // Per-column phase offset + a 70%-of-duration fall so trailing columns finish
+            // slightly later — the cascade reads as rain, not a hard wipe.
+            let offset = (cell_rng(x, 0, 7) % 40) as u64;
+            let prog = (local.saturating_sub(offset)) as f32 / (WATERFALL_DUR as f32 * 0.70);
+            let black_top = (prog.clamp(0.0, 1.0) * area.height as f32) as u16;
+            for row in 0..area.height {
+                let y = area.y + row;
+                if row < black_top {
+                    continue; // already drained to black
+                }
+                let digit = if cell_rng(x, y, elapsed / 2) & 1 == 0 { '0' } else { '1' };
+                // Bright leading edge, fading to dim emerald down the stream.
+                let lead = row == black_top;
+                let depth = (row - black_top) as f32 / area.height.max(1) as f32;
+                let g = (235.0 - depth * 150.0) as u8;
+                let col = if lead { Color::Rgb(200, 255, 200) } else { Color::Rgb(40, g.max(60), 40) };
+                put(buf, x, y, digit, col, void);
+            }
+        }
+        return;
+    }
+
+    // ── Post-waterfall — the apple centrepiece, held above the text band. ──
+    let apple_y = cy.saturating_sub(5);
+    draw_apple(buf, area, apple_y);
+
+    // Streaming clocks derived from the (deterministic) phase boundaries.
+    let syll_start = w_end + APPLE_HOLD;
+    let syll_done = syll_start + block_chars(SYLLOGISM) as u64 * CREDIT_FRAMES_PER_CHAR;
+    let pardon_start = syll_done + PHASE_GAP;
+    let pardon_done = pardon_start + block_chars(PARDON) as u64 * CREDIT_FRAMES_PER_CHAR;
+    let exit_start = pardon_done + PHASE_GAP;
+
+    if elapsed < pardon_start {
+        // ── Phase 3 — the syllogism, typed line by line below the apple. ──
+        let mut budget = (elapsed.saturating_sub(syll_start) / CREDIT_FRAMES_PER_CHAR) as usize;
+        let ink = Color::Rgb(222, 198, 150);
+        let mut ty = cy;
+        for line in SYLLOGISM {
+            let col = if line.starts_with('\u{2014}') { Color::Rgb(150, 130, 96) } else { ink };
+            stream_center(buf, area, ty, line, &mut budget, col, frame);
+            ty += 1;
+        }
+    } else {
+        // ── Phase 4 — the syllogism clears silently; the administrative seal types in an
+        //    affectless, bureaucratic gray. ──
+        let mut budget = (elapsed.saturating_sub(pardon_start) / CREDIT_FRAMES_PER_CHAR) as usize;
+        let seal = Color::Rgb(150, 150, 150);
+        let mut ty = cy + 1;
+        let mut all_done = true;
+        for line in PARDON {
+            let done = stream_center(buf, area, ty, line, &mut budget, seal, frame);
+            all_done &= done;
+            ty += 2;
+        }
+
+        // ── Phase 5 — the dead session: title, author, and the exit prompt, only once the
+        //    whole teardown has settled. ──
+        if elapsed >= exit_start && all_done {
+            let py = area.y + area.height.saturating_sub(3);
+            put_center(buf, area, py, "RESIDUES \u{2014} An Engine of Residual Minds", Color::Rgb(90, 84, 72));
+            put_center(buf, area, py + 1, "Developed by Iclal Dogan", Color::Rgb(70, 66, 56));
+            let on = (frame / 24) % 2 == 0;
+            let prompt = if on { Color::Rgb(120, 112, 96) } else { Color::Rgb(50, 47, 40) };
+            put_center(buf, area, py + 2, "[ the terminal will not answer \u{2014} press ENTER to leave ]", prompt);
+        }
+    }
+}
+
+/// The half-eaten green apple silhouette, centred horizontally at `top`. Bite + stem.
+fn draw_apple(buf: &mut Buffer, area: Rect, top: u16) {
+    let body = Color::Rgb(120, 200, 80); // living green
+    let dark = Color::Rgb(40, 80, 30);   // the bitten shadow
+    let stem = Color::Rgb(110, 80, 40);
+    let void = Color::Rgb(0, 0, 0);
+    let art: [(&str, Color); 4] = [
+        ("  \u{2572}      ", stem), // the stem ╲
+        (" \u{2584}\u{2588}\u{2588}\u{2584}   ", body),
+        ("\u{2580}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591} ", body),
+        ("  \u{2580}\u{2580}    ", body),
+    ];
+    let w = 8u16;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    for (i, (line, col)) in art.iter().enumerate() {
+        // The bite (░) is rendered in the darker shade for depth.
+        let mut cx = x;
+        for ch in line.chars() {
+            let c = if ch == '\u{2591}' { dark } else { *col };
+            put(buf, cx, top + i as u16, ch, c, void);
+            cx += 1;
+        }
     }
 }
 
