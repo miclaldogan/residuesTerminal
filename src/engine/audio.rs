@@ -36,10 +36,14 @@ fn resolve_audio_base() -> PathBuf {
 /// were inaudible under the clacks — these now sit as a present-but-background layer.
 const AMBIENT_TRACKS: &[(&str, u8)] = &[
     ("ambient/rain_wilmslow_loop.mp3", 55),
-    ("ambient/backgroundMusic.mp3", 62),
     ("sfx/bump.mp3", 72),
     ("ambient/clock_pendulum_loop.mp3", 45),
 ];
+/// The looping background score — a single switchable channel separate from the rain/
+/// bump/pendulum bed. The default plays everywhere; Act VI swaps to its own track.
+const SCORE_DEFAULT: &str = "ambient/backgroundMusic.mp3";
+const SCORE_TURING: &str = "ambient/turing_act_bgmusic.mp3";
+const SCORE_VOLUME: u8 = 62;
 /// Short, single typewriter clack — one strike per committed character.
 const SFX_KEY: &str = "sfx/daktiloOne.mp3";
 /// High-frequency clatter for rapid binary entry (Shannon bit masks).
@@ -131,6 +135,8 @@ fn marker_to_rel(marker: &str) -> Option<&'static str> {
         "VO_INTRO_BOOLE_2" => "speechs/boole_intro2.mp3",
         "VO_INTRO_SHANNON_1" => "speechs/shannon_intro1.mp3",
         "VO_INTRO_SHANNON_2" => "speechs/shannon_intro2.mp3",
+        "VO_INTRO_TURING_1" => "speechs/turing_intro1.mp3",
+        "VO_INTRO_TURING_2" => "speechs/turing_intro2.mp3",
         "SFX_DOOR_SLIDE" => "sfx/A_single,_isolated_s_#1-1781700210070.mp3",
         // Heavy interrogation bootstep — reuse the deep bump as a one-shot thud.
         "SFX_POLICE_BOOTSTEP" => "sfx/bump.mp3",
@@ -149,6 +155,8 @@ pub struct AudioEngine {
     speech: Option<Child>,      // one-shot voice line; replaces itself each play
     clacks: Vec<Child>,         // per-letter typewriter strikes, reaped lazily
     sfx: Vec<Child>,            // misc one-shot SFX (backspace, glitch), reaped lazily
+    score: Option<Child>,       // the one looping background-score channel (switchable)
+    score_is_turing: bool,      // which score track is currently looping
     prep: HashMap<&'static str, String>, // pre-trimmed WAVs for low-latency paplay
     base: PathBuf,              // resolved `audio/` directory (CWD-independent)
     muted: bool,                // master mute, toggled from the main menu
@@ -261,6 +269,8 @@ impl AudioEngine {
             speech: None,
             clacks: Vec::new(),
             sfx: Vec::new(),
+            score: None,
+            score_is_turing: false,
             prep,
             base,
             muted: false,
@@ -275,6 +285,7 @@ impl AudioEngine {
         if muted {
             Self::reap(&mut self.heartbeat);
             Self::reap(&mut self.speech);
+            Self::reap(&mut self.score);
             for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
                 for c in pool.iter_mut() {
                     let _ = c.kill();
@@ -283,6 +294,9 @@ impl AudioEngine {
                 pool.clear();
             }
             self.ambient_started = false;
+            // On unmute, ensure_ambient restarts the bed + default score, then the main
+            // loop's set_act_music re-applies the Turing swap if still warranted.
+            self.score_is_turing = false;
         }
     }
 
@@ -330,6 +344,29 @@ impl AudioEngine {
                 self.ambient.push(c);
             }
         }
+        // The background score starts on the default track; Act VI swaps it (see
+        // `set_act_music`). Tracked separately so it can be switched without disturbing
+        // the rain/bump/pendulum bed.
+        self.score = self.spawn(SCORE_DEFAULT, true, SCORE_VOLUME);
+        self.score_is_turing = false;
+    }
+
+    /// Select the looping background score for the current act: Act VI (Turing) gets its
+    /// own dedicated track; everywhere else (the menu, every other act) plays the default.
+    /// Idempotent — it only stops/restarts the score channel on an actual change, so the
+    /// default mix is cleanly restored the moment the player leaves the Turing workspace
+    /// (or returns to the menu), and the rain/bump/pendulum bed is never interrupted.
+    pub fn set_act_music(&mut self, turing: bool) {
+        if self.muted || self.player == Player::None || !self.ambient_started {
+            return;
+        }
+        if turing == self.score_is_turing {
+            return;
+        }
+        Self::reap(&mut self.score);
+        let track = if turing { SCORE_TURING } else { SCORE_DEFAULT };
+        self.score = self.spawn(track, true, SCORE_VOLUME);
+        self.score_is_turing = turing;
     }
 
     /// Measure a cue's sample length in 62.5 fps frames via ffprobe, so the typewriter
@@ -531,6 +568,7 @@ impl Drop for AudioEngine {
         // Never leave detached players howling after the TUI exits.
         Self::reap(&mut self.heartbeat);
         Self::reap(&mut self.speech);
+        Self::reap(&mut self.score);
         for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
             for c in pool.iter_mut() {
                 let _ = c.kill();
@@ -549,13 +587,14 @@ mod intro_voice_tests {
     #[test]
     fn act_intro_lines_resolve_to_existing_speech_files() {
         let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
-        // Five acts have a two-line spoken intro; each cue must map to a real file.
+        // All six acts now have a two-line spoken intro; each cue must map to a real file.
         let voiced = [
             Act::Jacquard1804,
             Act::Babbage1837,
             Act::Lovelace1843,
             Act::Boole1854,
             Act::Shannon1937,
+            Act::Turing1936_1950,
         ];
         for act in voiced {
             for n in 1..=2u8 {
@@ -564,7 +603,13 @@ mod intro_voice_tests {
                 assert!(base.join(rel).exists(), "missing speech asset: {}", rel);
             }
         }
-        // Turing has no take → no mapping, so the intro stays gracefully silent.
-        assert!(marker_to_rel(VoiceCue::ActIntroLine(Act::Turing1936_1950, 1).marker()).is_none());
+    }
+
+    #[test]
+    fn act_score_tracks_exist() {
+        // The default and the dedicated Act VI background scores must both ship.
+        let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
+        assert!(base.join(SCORE_DEFAULT).exists(), "missing {}", SCORE_DEFAULT);
+        assert!(base.join(SCORE_TURING).exists(), "missing {}", SCORE_TURING);
     }
 }

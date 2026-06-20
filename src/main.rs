@@ -684,11 +684,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.tick();
             dialogue.tick();
 
-            // The ambient beds (rain, low bump, background score, pendulum) run
+            // The ambient beds (rain, low bump, pendulum) and the background score run
             // continuously from the very first frame — the main menu included — and
             // loop for the whole session. Idempotent + mute-guarded, so it is safe to
             // call every tick regardless of screen state.
             audio.ensure_ambient();
+            // Act VI gets its own score the moment the player is on the Turing workspace;
+            // every other context (menu, prelude, other acts, cinematics) plays the
+            // default. Switching here each tick keeps the transition crisp and reversible.
+            let on_turing_desk = state.current_act == Act::Turing1936_1950
+                && state.screen_state.desk_visible();
+            audio.set_act_music(on_turing_desk);
 
             // Heartbeat metronome — fire beats at the live BPM. A `0.0` BPM is the
             // arrhythmia skip window, where no beat fires (the silence is the skip).
