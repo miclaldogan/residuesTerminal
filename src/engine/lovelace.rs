@@ -34,8 +34,10 @@ const REG_BLINK: Color = Color::Rgb(255, 150, 40);
 // ─────────────────────────────────────────────────────────────────────────────
 /// The 3-register computational ceiling. A reference to a 4th register aborts.
 const REGISTER_COUNT: usize = 3;
-/// Phase-1 linear core size: the 5th instruction triggers the memory overrun.
-const LINEAR_CORE_CEILING: usize = 4;
+/// Phase-1 linear core size: only 3 instruction slots are unlocked; the 4th overruns.
+const LINEAR_CORE_CEILING: usize = 3;
+/// Phase-2 editor capacity once branch ops unlock — the full programming surface.
+const PHASE2_MAX_ROWS: usize = 10;
 /// Runaway guard — execution beyond this many steps scorches the candle.
 const STEP_BURN_THRESHOLD: usize = 500;
 /// The targeted Bernoulli matrix-series checksum the program must accumulate in R3
@@ -50,7 +52,7 @@ const BERNOULLI_CHECKSUM: i64 = 28;
 /// The 2-state constraint funnel for the Analytical Engine programming puzzle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LovelacePhase {
-    /// Phase 1 — branch ops locked; straight-line code only, capped at 4 instructions.
+    /// Phase 1 — branch ops locked; straight-line code only, capped at 3 instructions.
     LinearFlow,
     /// Phase 2 — branch ops (`IF_Z`, `JMP`) unlocked; loops are required.
     LoopBranch,
@@ -113,7 +115,7 @@ pub struct LovelacePuzzle {
     pub solved: bool,
     /// Set after a runaway loop — drives the high-frequency register-glyph thrash.
     pub thrashing: bool,
-    /// Set when Phase 1 overruns its 4-instruction core, pending player acknowledgment.
+    /// Set when Phase 1 hits its 3-slot linear core ceiling, pending player acknowledgment.
     pub crashed_overrun: bool,
 }
 
@@ -133,12 +135,22 @@ impl LovelacePuzzle {
             last_steps: 0,
             status_log: vec![
                 ("Accumulate the Bernoulli checksum into R3. Press R to compile.".to_string(), LogKind::Info),
-                ("PHASE 1: branch ops locked. Linear core capped at 4 instructions.".to_string(), LogKind::Warning),
+                ("[OBJECTIVE]: Synthesize target output using a maximum of 3 ADD slots.".to_string(), LogKind::Warning),
             ],
             error_line: None,
             solved: false,
             thrashing: false,
             crashed_overrun: false,
+        }
+    }
+
+    /// The editor's hard row capacity for the current phase: a 3-slot linear core in
+    /// Phase 1, expanding to the full 10-line programming surface once Phase 2 unlocks.
+    /// Drives both the cursor/add caps and the locked-row rendering.
+    pub fn max_rows(&self) -> usize {
+        match self.phase {
+            LovelacePhase::LinearFlow => LINEAR_CORE_CEILING,
+            LovelacePhase::LoopBranch => PHASE2_MAX_ROWS,
         }
     }
 
@@ -269,9 +281,15 @@ impl LovelacePuzzle {
             Ok(v) => v,
             Err(e) => {
                 self.error_line = Some(e.line);
-                self.push_log(format!("[{}] {}", e.code, e.msg), LogKind::Error);
                 if e.code == "ERR_MEM_OVERRUN" {
+                    // The linear core was exceeded — state it plainly and funnel to Phase 2.
+                    self.push_log(
+                        "[REGISTRY ERROR]: Phase 1 register allocation exceeded. Optimize code within the active 3-line boundary.".to_string(),
+                        LogKind::Error,
+                    );
                     self.crashed_overrun = true;
+                } else {
+                    self.push_log(format!("[{}] {}", e.code, e.msg), LogKind::Error);
                 }
                 return;
             }
@@ -611,9 +629,9 @@ pub fn render_lovelace(
         render_centered_overlay(
             buf, area, Color::Rgb(24, 10, 0), ERR_FG,
             &[
-                ("[ERR_MEM_OVERRUN]", ERR_FG),
-                ("Linear core exceeds 4 instructions.", Color::Rgb(220, 120, 40)),
-                ("The 3-register engine cannot unroll this.", Color::Rgb(220, 120, 40)),
+                ("[REGISTRY ERROR]", ERR_FG),
+                ("Phase 1 register allocation exceeded.", Color::Rgb(220, 120, 40)),
+                ("The 3-line linear core cannot unroll a series.", Color::Rgb(220, 120, 40)),
                 ("", WS_BG),
                 ("[ any key: unlock PHASE 2 LoopBranch ]", DIM_FG),
             ],
@@ -694,6 +712,26 @@ pub fn render_lovelace(
         let line = clip(&format!("{}{} {}", marker, prefix, content), editor_w);
         buf_set_str(buf, editor_x, ry, &line, Style::default().fg(color).bg(WS_BG));
         ry += 1;
+    }
+
+    // ── Phase 1 is hard-capped to the 3-slot linear core. Draw the slots beyond the
+    //    written source as dimmed placeholders so the boundary is explicit: empty
+    //    slots within the cap read as "···"; everything past it as "[ LOCKED ]", a
+    //    visual promise of the 10-line surface that Phase 2 unlocks. ──
+    if puzzle.phase == LovelacePhase::LinearFlow {
+        let locked_until = LINEAR_CORE_CEILING + 3; // a few locked rows as a hint
+        let mut slot = puzzle.source.len();
+        while ry < ed_bottom && slot < locked_until {
+            let body = if slot < LINEAR_CORE_CEILING {
+                "\u{00B7}\u{00B7}\u{00B7}".to_string() // empty, still-writeable slot
+            } else {
+                "[ LOCKED ]".to_string()
+            };
+            let txt = clip(&format!("  {:>2}\u{2502} {}", slot, body), editor_w);
+            buf_set_str(buf, editor_x, ry, &txt, Style::default().fg(DIM_FG).bg(WS_BG));
+            ry += 1;
+            slot += 1;
+        }
     }
 
     // ── The three registers as vertical animated data columns. ──
@@ -866,6 +904,26 @@ pub fn handle_input(
             puzzle.edit_buffer = puzzle.source.get(puzzle.cursor_line).cloned().unwrap_or_default();
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
+            if puzzle.source.len() >= puzzle.max_rows() {
+                // The row vector is hard-capped per phase. Hitting the Phase-1 ceiling is
+                // the funnel into Phase 2 (loops); in Phase 2 it's simply the 10-line wall.
+                match puzzle.phase {
+                    LovelacePhase::LinearFlow => {
+                        puzzle.push_log(
+                            "[REGISTRY ERROR]: Phase 1 register allocation exceeded. Optimize code within the active 3-line boundary.".to_string(),
+                            LogKind::Error,
+                        );
+                        puzzle.crashed_overrun = true; // → next key unlocks Phase 2
+                    }
+                    LovelacePhase::LoopBranch => {
+                        puzzle.push_log(
+                            format!("Editor full \u{2014} {} lines is the Phase 2 limit.", PHASE2_MAX_ROWS),
+                            LogKind::Warning,
+                        );
+                    }
+                }
+                return;
+            }
             let at = (puzzle.cursor_line + 1).min(puzzle.source.len());
             puzzle.source.insert(at, String::new());
             puzzle.cursor_line = at;
@@ -940,13 +998,25 @@ mod tests {
     }
 
     #[test]
-    fn phase_one_overruns_after_four_instructions() {
-        let five: Vec<&str> = vec!["LOAD 0, 1"; 5];
-        let p = puzzle_with(LovelacePhase::LinearFlow, &five);
-        assert_eq!(p.compile().unwrap_err().code, "ERR_MEM_OVERRUN");
-        // ...but exactly 4 is fine.
+    fn phase_one_overruns_above_the_three_line_core() {
+        // A 4th instruction overruns the Phase-1 linear core...
         let four: Vec<&str> = vec!["LOAD 0, 1"; 4];
-        assert!(puzzle_with(LovelacePhase::LinearFlow, &four).compile().is_ok());
+        let p = puzzle_with(LovelacePhase::LinearFlow, &four);
+        assert_eq!(p.compile().unwrap_err().code, "ERR_MEM_OVERRUN");
+        // ...but exactly 3 is fine.
+        let three: Vec<&str> = vec!["LOAD 0, 1"; 3];
+        assert!(puzzle_with(LovelacePhase::LinearFlow, &three).compile().is_ok());
+    }
+
+    #[test]
+    fn editor_capacity_expands_from_three_to_ten() {
+        // The adaptive row bound: a fresh puzzle is Phase 1 (3 slots); unlocking the
+        // branch phase expands the writeable surface to the full 10 lines.
+        let mut p = LovelacePuzzle::new();
+        assert_eq!(p.phase, LovelacePhase::LinearFlow);
+        assert_eq!(p.max_rows(), 3);
+        p.phase = LovelacePhase::LoopBranch;
+        assert_eq!(p.max_rows(), 10);
     }
 
     #[test]
