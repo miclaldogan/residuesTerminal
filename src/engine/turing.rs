@@ -40,8 +40,9 @@ const MAX_TAPE: usize = 64;
 const MAX_STEPS: usize = 256;
 /// Frames between Imitation-Game split-interrogation phases (~20s at 62.5 fps).
 const INTERROGATION_PERIOD: u16 = 1250;
-/// Frames the player has to answer an interrogation (~7s).
-const INTERROGATION_WINDOW: u16 = 440;
+/// Frames the player has to answer an interrogation — a comfortable but tense ~15 s at
+/// 62.5 fps, so there is time to read the milestone log and absorb the text degradation.
+const INTERROGATION_WINDOW: u16 = 938;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // THE STATE MACHINE
@@ -537,7 +538,9 @@ pub fn render_workspace(
     //    they materialise only once the line has finished (or been skipped). ──
     let mut deck_y = ctrl_y + 2;
     if let Some(inter) = core.interrogation.as_ref().filter(|_| !narration_streaming) {
-        let secs = (inter.timer / 62).saturating_add(1);
+        // Ceil-divide by the ~63-frame second so a 938-frame window reads a clean 15→1
+        // and never flashes 0 while time remains.
+        let secs = (inter.timer + 62) / 63;
         buf_set_str(
             buf,
             inner_x,

@@ -46,8 +46,9 @@ const SCORE_TURING: &str = "ambient/turing_act_bgmusic.mp3";
 const SCORE_VOLUME: u8 = 62;
 
 // ── "Memory Echoes" binaural whispers ────────────────────────────────────────
-/// Low background level for the whisper layer (it sits *under* the daktilo cascade).
-const WHISPER_VOLUME: u8 = 38;
+/// Whisper layer level — lifted from a too-quiet 38 so the directional echoes cut
+/// clearly through the background score while staying airy and ghostly (not blaring).
+const WHISPER_VOLUME: u8 = 76;
 /// The two hard-pan positions the alternating latch flips between (−1 = full left,
 /// +1 = full right) — a disorienting binaural memory-fragment effect for headphones.
 const PAN_LEFT: f32 = -0.80;
@@ -145,6 +146,18 @@ fn marker_to_rel(marker: &str) -> Option<&'static str> {
         "VO_INTRO_SHANNON_2" => "speechs/shannon_intro2.mp3",
         "VO_INTRO_TURING_1" => "speechs/turing_intro1.mp3",
         "VO_INTRO_TURING_2" => "speechs/turing_intro2.mp3",
+        // Cinematic act-outro voice takes — two spoken lines per act, synced to the
+        // typewriter. Turing's outro is intentionally silent (no take → falls through).
+        "VO_OUTRO_JACQUARD_1" => "speechs/jacquard_outro1.mp3",
+        "VO_OUTRO_JACQUARD_2" => "speechs/jacquard_outro2.mp3",
+        "VO_OUTRO_BABBAGE_1" => "speechs/babbage_outro1.mp3",
+        "VO_OUTRO_BABBAGE_2" => "speechs/babbage_outro2.mp3",
+        "VO_OUTRO_LOVELACE_1" => "speechs/lovelace_outro1.mp3",
+        "VO_OUTRO_LOVELACE_2" => "speechs/lovelace_outro2.mp3",
+        "VO_OUTRO_BOOLE_1" => "speechs/boole_outro1.mp3",
+        "VO_OUTRO_BOOLE_2" => "speechs/boole_outro2.mp3",
+        "VO_OUTRO_SHANNON_1" => "speechs/shannon_outro1.mp3",
+        "VO_OUTRO_SHANNON_2" => "speechs/shannon_outro2.mp3",
         "SFX_DOOR_SLIDE" => "sfx/A_single,_isolated_s_#1-1781700210070.mp3",
         // Heavy interrogation bootstep — reuse the deep bump as a one-shot thud.
         "SFX_POLICE_BOOTSTEP" => "sfx/bump.mp3",
@@ -713,6 +726,28 @@ mod intro_voice_tests {
                 assert!(base.join(rel).exists(), "missing speech asset: {}", rel);
             }
         }
+    }
+
+    #[test]
+    fn act_outro_lines_resolve_to_existing_speech_files() {
+        let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
+        // Five acts have a two-line voiced outro; each cue must map to a real file.
+        let voiced = [
+            Act::Jacquard1804,
+            Act::Babbage1837,
+            Act::Lovelace1843,
+            Act::Boole1854,
+            Act::Shannon1937,
+        ];
+        for act in voiced {
+            for n in 1..=2u8 {
+                let marker = VoiceCue::ActOutroLine(act, n).marker();
+                let rel = marker_to_rel(marker).expect("outro line should map to a file");
+                assert!(base.join(rel).exists(), "missing outro asset: {}", rel);
+            }
+        }
+        // Turing's outro is intentionally silent — its markers map to nothing.
+        assert!(marker_to_rel(VoiceCue::ActOutroLine(Act::Turing1936_1950, 1).marker()).is_none());
     }
 
     #[test]

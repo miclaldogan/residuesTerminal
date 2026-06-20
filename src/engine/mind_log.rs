@@ -131,6 +131,9 @@ pub enum VoiceCue {
     /// A spoken biography line in the cinematic act intro: `(act, 1-based line number)`.
     /// Resolves to `audio/speechs/<act>_intro<n>.mp3` (Turing has no take → silent).
     ActIntroLine(Act, u8),
+    /// A spoken line in the cinematic act outro: `(act, 1-based line number)`.
+    /// Resolves to `audio/speechs/<act>_outro<n>.mp3` (Turing's outro is silent by design).
+    ActOutroLine(Act, u8),
     JacquardTear,
     JacquardJam,
     BabbageCrunch,
@@ -172,6 +175,19 @@ impl VoiceCue {
             VoiceCue::ActIntroLine(Act::Shannon1937, _) => "VO_INTRO_SHANNON_2",
             VoiceCue::ActIntroLine(Act::Turing1936_1950, 1) => "VO_INTRO_TURING_1",
             VoiceCue::ActIntroLine(Act::Turing1936_1950, _) => "VO_INTRO_TURING_2",
+            // Per-line cinematic outro voice takes (1 or 2). Turing's outro is silent.
+            VoiceCue::ActOutroLine(Act::Jacquard1804, 1) => "VO_OUTRO_JACQUARD_1",
+            VoiceCue::ActOutroLine(Act::Jacquard1804, _) => "VO_OUTRO_JACQUARD_2",
+            VoiceCue::ActOutroLine(Act::Babbage1837, 1) => "VO_OUTRO_BABBAGE_1",
+            VoiceCue::ActOutroLine(Act::Babbage1837, _) => "VO_OUTRO_BABBAGE_2",
+            VoiceCue::ActOutroLine(Act::Lovelace1843, 1) => "VO_OUTRO_LOVELACE_1",
+            VoiceCue::ActOutroLine(Act::Lovelace1843, _) => "VO_OUTRO_LOVELACE_2",
+            VoiceCue::ActOutroLine(Act::Boole1854, 1) => "VO_OUTRO_BOOLE_1",
+            VoiceCue::ActOutroLine(Act::Boole1854, _) => "VO_OUTRO_BOOLE_2",
+            VoiceCue::ActOutroLine(Act::Shannon1937, 1) => "VO_OUTRO_SHANNON_1",
+            VoiceCue::ActOutroLine(Act::Shannon1937, _) => "VO_OUTRO_SHANNON_2",
+            VoiceCue::ActOutroLine(Act::Turing1936_1950, 1) => "VO_OUTRO_TURING_1",
+            VoiceCue::ActOutroLine(Act::Turing1936_1950, _) => "VO_OUTRO_TURING_2",
             VoiceCue::JacquardTear => "VO_JACQUARD_TEAR",
             VoiceCue::JacquardJam => "VO_JACQUARD_JAM",
             VoiceCue::BabbageCrunch => "VO_BABBAGE_CRUNCH",

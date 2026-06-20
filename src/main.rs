@@ -71,8 +71,6 @@ fn enter_act_intro(
     dialogue.play_timed(Speaker::System, cinematic::intro(act_id).lines[0], Some(cue), frames);
 }
 
-/// Enter the cinematic act-outro (the tragedy of the act just cleared). Mirrors
-/// [`enter_act_intro`]; the outro scene has no dedicated voice cue, so it streams silent.
 /// The whisper-asset prefix for the acts whose Memory Echoes fire on each narrative line
 /// (`whispers/<prefix>_<left|right>.mp3`). Boole and Turing return `None` — they drive
 /// their own context-specific whispers (Boole's binary TRUE/FALSE lock, Turing's
@@ -87,10 +85,22 @@ fn act_whisper_prefix(act: Act) -> Option<&'static str> {
     }
 }
 
-fn enter_act_outro(state: &mut GlobalStateContext, dialogue: &mut DialogueEngine, act_id: u8) {
+/// Enter the cinematic act-outro (the tragedy of the act just cleared). Mirrors
+/// [`enter_act_intro`]: the first outro line is synced to its `<act>_outro1.mp3` voice
+/// take (typewriter stretched to the audio length). Turing's outro has no take, so it
+/// streams silent at the default cadence.
+fn enter_act_outro(
+    state: &mut GlobalStateContext,
+    dialogue: &mut DialogueEngine,
+    audio: &AudioEngine,
+    act_id: u8,
+) {
     cinematic::preload_outro(act_id);
     state.screen_state = ScreenState::ActOutro { act_id, text_index: 0, timer: 0 };
-    dialogue.play(Speaker::System, cinematic::outro(act_id).lines[0], None);
+    let act = cinematic::act_from_id(act_id);
+    let cue = VoiceCue::ActOutroLine(act, 1);
+    let frames = audio.duration_frames(cue.marker());
+    dialogue.play_timed(Speaker::System, cinematic::outro(act_id).lines[0], Some(cue), frames);
 }
 
 fn draw_top_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &GlobalStateContext) {
@@ -687,7 +697,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     audio.stop_voice_tracks();
                                     let ni = text_index + 1;
                                     state.screen_state = ScreenState::ActOutro { act_id, text_index: ni, timer };
-                                    dialogue.play(Speaker::System, lines[ni], None);
+                                    // Next outro line, synced to its own voice take.
+                                    let cue = VoiceCue::ActOutroLine(cinematic::act_from_id(act_id), (ni + 1) as u8);
+                                    let frames = audio.duration_frames(cue.marker());
+                                    dialogue.play_timed(Speaker::System, lines[ni], Some(cue), frames);
                                 } else {
                                     audio.stop_voice_tracks();
                                     if act_id >= 6 {
@@ -878,7 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current_act: furthest_act,
                             acts_completed: state.acts_completed.clone(),
                         });
-                        enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(completed));
+                        enter_act_outro(&mut state, &mut dialogue, &audio, cinematic::id_from_act(completed));
                     }
 
                     // ── Endgame: Turing is the final act, so its win never advances
@@ -896,7 +909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             acts_completed: state.acts_completed.clone(),
                         });
                         audio.stop_whisper(); // no lingering echo into the apple finale
-                        enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(Act::Turing1936_1950));
+                        enter_act_outro(&mut state, &mut dialogue, &audio, cinematic::id_from_act(Act::Turing1936_1950));
                     }
 
                     // Jacquard failure voice hooks (rising-edge detection).
