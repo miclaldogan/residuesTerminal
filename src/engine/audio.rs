@@ -44,6 +44,14 @@ const AMBIENT_TRACKS: &[(&str, u8)] = &[
 const SCORE_DEFAULT: &str = "ambient/backgroundMusic.mp3";
 const SCORE_TURING: &str = "ambient/turing_act_bgmusic.mp3";
 const SCORE_VOLUME: u8 = 62;
+
+// ── "Memory Echoes" binaural whispers ────────────────────────────────────────
+/// Low background level for the whisper layer (it sits *under* the daktilo cascade).
+const WHISPER_VOLUME: u8 = 38;
+/// The two hard-pan positions the alternating latch flips between (−1 = full left,
+/// +1 = full right) — a disorienting binaural memory-fragment effect for headphones.
+const PAN_LEFT: f32 = -0.80;
+const PAN_RIGHT: f32 = 0.80;
 /// Short, single typewriter clack — one strike per committed character.
 const SFX_KEY: &str = "sfx/daktiloOne.mp3";
 /// High-frequency clatter for rapid binary entry (Shannon bit masks).
@@ -157,6 +165,8 @@ pub struct AudioEngine {
     sfx: Vec<Child>,            // misc one-shot SFX (backspace, glitch), reaped lazily
     score: Option<Child>,       // the one looping background-score channel (switchable)
     score_is_turing: bool,      // which score track is currently looping
+    whisper: Option<Child>,     // the current "Memory Echo" whisper (single, replaceable)
+    whisper_pan_latch: f32,     // alternating L/R latch flipped on each whisper
     prep: HashMap<&'static str, String>, // pre-trimmed WAVs for low-latency paplay
     base: PathBuf,              // resolved `audio/` directory (CWD-independent)
     muted: bool,                // master mute, toggled from the main menu
@@ -241,6 +251,14 @@ fn prepare_short_set(base: &Path) -> HashMap<&'static str, String> {
     m
 }
 
+/// Map a pan value `p` (−1 full-left .. +1 full-right) to per-ear linear gains
+/// `(left, right)`: −1 → (1.0, 0.0), 0 → (0.5, 0.5), +1 → (0.0, 1.0).
+fn pan_gains(p: f32) -> (f32, f32) {
+    let l = ((1.0 - p) / 2.0).clamp(0.0, 1.0);
+    let r = ((1.0 + p) / 2.0).clamp(0.0, 1.0);
+    (l, r)
+}
+
 /// Fire a pre-trimmed WAV through low-latency `paplay`.
 fn play_paplay(wav: &str, volume: u32) -> Option<Child> {
     Command::new("paplay")
@@ -271,6 +289,8 @@ impl AudioEngine {
             sfx: Vec::new(),
             score: None,
             score_is_turing: false,
+            whisper: None,
+            whisper_pan_latch: PAN_LEFT,
             prep,
             base,
             muted: false,
@@ -286,6 +306,7 @@ impl AudioEngine {
             Self::reap(&mut self.heartbeat);
             Self::reap(&mut self.speech);
             Self::reap(&mut self.score);
+            Self::reap(&mut self.whisper);
             for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
                 for c in pool.iter_mut() {
                     let _ = c.kill();
@@ -386,10 +407,24 @@ impl AudioEngine {
     }
 
     fn spawn(&self, rel: &str, looping: bool, volume: u8) -> Option<Child> {
+        self.spawn_panned(rel, looping, volume, None)
+    }
+
+    /// Spawn a detached player, optionally hard-panned via the player's audio filter.
+    /// `pan` is −1.0 (full left) .. +1.0 (full right); a stereo `pan` filter scales the
+    /// (first) channel into each output ear. mpg123 has no filter graph, so it ignores
+    /// the pan (plays centred) — a graceful, never-fatal degrade.
+    fn spawn_panned(&self, rel: &str, looping: bool, volume: u8, pan: Option<f32>) -> Option<Child> {
         if self.player == Player::None || self.muted {
             return None;
         }
         let path = self.base.join(rel);
+        // ffmpeg/libavfilter `pan` graph: split the source channel into both ears with
+        // the requested left/right gains, so a mono or stereo whisper lands hard on one side.
+        let pan_graph = pan.map(|p| {
+            let (l, r) = pan_gains(p);
+            format!("pan=stereo|c0={:.3}*c0|c1={:.3}*c0", l, r)
+        });
         let mut cmd = match self.player {
             Player::Mpv => {
                 let mut c = Command::new("mpv");
@@ -397,6 +432,9 @@ impl AudioEngine {
                     .arg("--really-quiet")
                     .arg("--no-video")
                     .arg(format!("--volume={}", volume));
+                if let Some(g) = &pan_graph {
+                    c.arg(format!("--af=lavfi=[{}]", g));
+                }
                 if looping {
                     c.arg("--loop-file=inf");
                 }
@@ -411,6 +449,9 @@ impl AudioEngine {
                     .arg("quiet")
                     .arg("-volume")
                     .arg(volume.to_string());
+                if let Some(g) = &pan_graph {
+                    c.arg("-af").arg(g);
+                }
                 if looping {
                     c.arg("-loop").arg("0");
                 }
@@ -451,6 +492,31 @@ impl AudioEngine {
     /// narrative state, the main loop calls this to cut the audio dead immediately.
     pub fn stop_voice_tracks(&mut self) {
         Self::reap(&mut self.speech);
+    }
+
+    /// The alternating L/R pan latch (the "automated state machine"): returns the side
+    /// for the next whisper, then flips, so consecutive memory echoes hop ears.
+    pub fn next_whisper_pan(&mut self) -> f32 {
+        let pan = self.whisper_pan_latch;
+        self.whisper_pan_latch = if self.whisper_pan_latch < 0.0 { PAN_RIGHT } else { PAN_LEFT };
+        pan
+    }
+
+    /// Fire one "Memory Echo" whisper at low background level, hard-panned to `pan`. Only
+    /// one whisper sounds at a time — the previous is reaped first, so echoes never pile
+    /// up and a missing asset is a clean no-op (the player just exits immediately).
+    pub fn play_whisper(&mut self, rel: &str, pan: f32) {
+        if self.muted {
+            return;
+        }
+        Self::reap(&mut self.whisper);
+        self.whisper = self.spawn_panned(rel, false, WHISPER_VOLUME, Some(pan));
+    }
+
+    /// Instantly cut the active whisper (the pacing guard: when the player skips a line
+    /// mid-stream, the running echo is killed cleanly rather than cracking on).
+    pub fn stop_whisper(&mut self) {
+        Self::reap(&mut self.whisper);
     }
 
     /// Fire a one-shot cue (a Turing speech line, the door slide, a bootstep). Any
@@ -569,10 +635,40 @@ impl Drop for AudioEngine {
         Self::reap(&mut self.heartbeat);
         Self::reap(&mut self.speech);
         Self::reap(&mut self.score);
+        Self::reap(&mut self.whisper);
         for pool in [&mut self.ambient, &mut self.clacks, &mut self.sfx] {
             for c in pool.iter_mut() {
                 let _ = c.kill();
                 let _ = c.wait();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod whisper_tests {
+    use super::*;
+
+    #[test]
+    fn pan_gains_map_left_centre_right() {
+        let (l, r) = pan_gains(PAN_LEFT);
+        assert!((l - 0.9).abs() < 1e-4 && (r - 0.1).abs() < 1e-4, "−0.80 is left-heavy");
+        let (l, r) = pan_gains(PAN_RIGHT);
+        assert!((l - 0.1).abs() < 1e-4 && (r - 0.9).abs() < 1e-4, "+0.80 is right-heavy");
+        let (l, r) = pan_gains(0.0);
+        assert!((l - 0.5).abs() < 1e-4 && (r - 0.5).abs() < 1e-4, "centre is even");
+        // Hard extremes clamp cleanly into [0, 1].
+        assert_eq!(pan_gains(-1.0), (1.0, 0.0));
+        assert_eq!(pan_gains(1.0), (0.0, 1.0));
+    }
+
+    #[test]
+    fn turing_milestone_whispers_exist_both_ears() {
+        let base = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/audio"));
+        for q in 1..=5 {
+            for side in ["left", "right"] {
+                let rel = format!("whispers/turing_q{}_{}.mp3", q, side);
+                assert!(base.join(&rel).exists(), "missing milestone whisper: {}", rel);
             }
         }
     }

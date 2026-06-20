@@ -73,6 +73,20 @@ fn enter_act_intro(
 
 /// Enter the cinematic act-outro (the tragedy of the act just cleared). Mirrors
 /// [`enter_act_intro`]; the outro scene has no dedicated voice cue, so it streams silent.
+/// The whisper-asset prefix for the acts whose Memory Echoes fire on each narrative line
+/// (`whispers/<prefix>_<left|right>.mp3`). Boole and Turing return `None` — they drive
+/// their own context-specific whispers (Boole's binary TRUE/FALSE lock, Turing's
+/// chronological milestone takes), so they are not double-fired here.
+fn act_whisper_prefix(act: Act) -> Option<&'static str> {
+    match act {
+        Act::Jacquard1804 => Some("jacquard"),
+        Act::Babbage1837 => Some("babbage"),
+        Act::Lovelace1843 => Some("lovelace"),
+        Act::Shannon1937 => Some("shannon"),
+        Act::Boole1854 | Act::Turing1936_1950 => None,
+    }
+}
+
 fn enter_act_outro(state: &mut GlobalStateContext, dialogue: &mut DialogueEngine, act_id: u8) {
     cinematic::preload_outro(act_id);
     state.screen_state = ScreenState::ActOutro { act_id, text_index: 0, timer: 0 };
@@ -777,6 +791,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 audio.daktilo_strike();
             }
 
+            // ── Memory Echoes. Skipping a line instantly cuts the running whisper (the
+            //    pacing guard); each fresh narrative line fires a new low whisper that
+            //    hops ears via the alternating pan latch. Turing milestones are fired
+            //    precisely from tick_turing (chronological index) and Boole's binary
+            //    TRUE/FALSE lock from its own handler — so they return `None` here. ──
+            if dialogue.took_skip() {
+                audio.stop_whisper();
+            }
+            if dialogue.took_line_start() {
+                if let Some(prefix) = act_whisper_prefix(state.current_act) {
+                    let pan = audio.next_whisper_pan();
+                    let side = if pan < 0.0 { "left" } else { "right" };
+                    audio.play_whisper(&format!("whispers/{}_{}.mp3", prefix, side), pan);
+                }
+            }
+
             match state.screen_state {
                 // Phase 0: the menu only breathes (frame counter drives the candle
                 // flicker); nothing in the simulation advances.
@@ -861,6 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             current_act: furthest_act,
                             acts_completed: state.acts_completed.clone(),
                         });
+                        audio.stop_whisper(); // no lingering echo into the apple finale
                         enter_act_outro(&mut state, &mut dialogue, cinematic::id_from_act(Act::Turing1936_1950));
                     }
 
@@ -918,5 +949,17 @@ mod render_tests {
         smoke(80, 24);  // classic
         smoke(40, 14);  // tight
         smoke(20, 8);   // degenerate (panels self-guard)
+    }
+
+    #[test]
+    fn whisper_prefixes_cover_the_line_driven_acts_only() {
+        // Boole and Turing fire their own context-specific whispers, so they opt out of
+        // the generic per-line trigger; the rest map to a whisper-asset prefix.
+        assert_eq!(act_whisper_prefix(Act::Jacquard1804), Some("jacquard"));
+        assert_eq!(act_whisper_prefix(Act::Babbage1837), Some("babbage"));
+        assert_eq!(act_whisper_prefix(Act::Lovelace1843), Some("lovelace"));
+        assert_eq!(act_whisper_prefix(Act::Shannon1937), Some("shannon"));
+        assert_eq!(act_whisper_prefix(Act::Boole1854), None);
+        assert_eq!(act_whisper_prefix(Act::Turing1936_1950), None);
     }
 }

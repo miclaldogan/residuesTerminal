@@ -609,6 +609,13 @@ pub fn handle_input(
             if r < puzzle.logic_grid.len() && c < GRID_W {
                 puzzle.logic_grid[r][c] = puzzle.logic_grid[r][c].cycle();
                 audio.menu_confirm(); // heavy mechanical latch on each gate cycle
+                // Memory Echo, binary-locked: the thought of TRUE punches the left ear,
+                // FALSE the right — driven by the input bit under the cursor's lane.
+                if puzzle.input_bits.get(c).copied().unwrap_or(0) == 1 {
+                    audio.play_whisper("whispers/boole_true.mp3", -0.80);
+                } else {
+                    audio.play_whisper("whispers/boole_false.mp3", 0.80);
+                }
             }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {

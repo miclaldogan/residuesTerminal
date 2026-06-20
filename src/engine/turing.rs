@@ -947,6 +947,12 @@ pub fn tick_turing(
         // Accelerated Act VI cadence so the choices unlock without dead air.
         dialogue.play_fast(Speaker::System, def.log, Some(VoiceCue::PoliceBootstep));
     }
+    // Memory Echo: the prepared milestone whisper (q1..q5), hard-panned to the latched
+    // ear so consecutive milestones alternate left/right — aligned to the chronological
+    // state via the residue index. Both `_left` and `_right` takes exist per milestone.
+    let pan = audio.next_whisper_pan();
+    let side = if pan < 0.0 { "left" } else { "right" };
+    audio.play_whisper(&format!("whispers/turing_q{}_{}.mp3", idx + 1, side), pan);
 }
 
 #[cfg(test)]

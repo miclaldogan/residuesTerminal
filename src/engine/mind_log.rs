@@ -349,6 +349,8 @@ pub struct DialogueEngine {
     pending_cue: Option<VoiceCue>,
     active: bool,
     done: bool,
+    line_started: bool, // one-shot: a new line began streaming this frame
+    skipped: bool,      // one-shot: the line was flushed by a skip this frame
     /// Completed lines, oldest first — the descending narrative scrollback that the
     /// mind log renders above the line currently being typed.
     history: Vec<(Speaker, String)>,
@@ -361,6 +363,8 @@ impl DialogueEngine {
             idx: 0,
             displayed: Vec::new(),
             timer: 0,
+            line_started: false,
+            skipped: false,
             scale: 1.0,
             keystroke: false,
             speaker: Speaker::System,
@@ -398,6 +402,7 @@ impl DialogueEngine {
         self.speaker = speaker;
         self.pending_cue = cue;
         self.active = true;
+        self.line_started = true; // a fresh narrative line — drives the Memory-Echo whisper
     }
 
     /// Stream a plain string (act intros, system prompts) at the default cadence.
@@ -485,8 +490,27 @@ impl DialogueEngine {
         k
     }
 
+    /// One-shot: true for the single frame a new narrative line began streaming. Drives
+    /// the Memory-Echo whisper trigger in the main loop.
+    pub fn took_line_start(&mut self) -> bool {
+        let s = self.line_started;
+        self.line_started = false;
+        s
+    }
+
+    /// One-shot: true for the single frame the active line was flushed by a skip. The
+    /// main loop uses it to instantly cut any running whisper (the pacing guard).
+    pub fn took_skip(&mut self) -> bool {
+        let s = self.skipped;
+        self.skipped = false;
+        s
+    }
+
     /// Reveal the whole line immediately (used when the user taps a key to skip).
     pub fn skip(&mut self) {
+        if !self.done {
+            self.skipped = true; // signal the pacing guard to cut the whisper
+        }
         while self.idx < self.atoms.len() {
             match self.atoms[self.idx] {
                 Atom::Put(c) => self.displayed.push(c),
