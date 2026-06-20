@@ -38,8 +38,12 @@ const BLANK: u8 = 0x5F;
 /// guarantees the executor always terminates (no infinite hang on a trapped head).
 const MAX_TAPE: usize = 64;
 const MAX_STEPS: usize = 256;
-/// Frames between Imitation-Game split-interrogation phases (~20s at 62.5 fps).
-const INTERROGATION_PERIOD: u16 = 1250;
+/// Frames between Imitation-Game split-interrogation phases — a short breathing beat
+/// (~3 s at 62.5 fps) so the next question arrives promptly after the current one resolves,
+/// rather than leaving the puzzle frozen. (Was 1250 ≈ 20 s, the cause of the dead pause.)
+/// Note: the per-question answer window — the heart-spike mechanic — is the separate, longer
+/// `INTERROGATION_WINDOW` below and is unchanged.
+const INTERROGATION_PERIOD: u16 = 188;
 /// Frames the player has to answer an interrogation — a comfortable but tense ~15 s at
 /// 62.5 fps, so there is time to read the milestone log and absorb the text degradation.
 const INTERROGATION_WINDOW: u16 = 938;
@@ -368,6 +372,24 @@ const INTERROGATIONS: [InterroDef; 5] = [
     },
 ];
 
+/// Split an authored interrogation prompt — formatted `"<question> \u{2014} 1:… | 2:… | 3:…"`
+/// — into the question text and its individual options. Layout-only: every fragment is the
+/// verbatim authored wording, just trimmed. Falls back to `(whole prompt, [])` if the prompt
+/// carries no `\u{2014}` separator.
+fn split_prompt(prompt: &str) -> (&str, Vec<&str>) {
+    match prompt.split_once('\u{2014}') {
+        Some((question, opts)) => {
+            let options = opts
+                .split('|')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (question.trim(), options)
+        }
+        None => (prompt.trim(), Vec::new()),
+    }
+}
+
 /// Word-wrap a string to `max_w`-wide lines (breaking on spaces; an over-long token is
 /// hard-split). Used to lay the interrogation prompt across the narrow centre panel.
 fn wrap_text(text: &str, max_w: usize) -> Vec<String> {
@@ -549,13 +571,27 @@ pub fn render_workspace(
             Style::default().fg(FAIL_FG).bg(WS_BG),
         );
         deck_y += 1;
-        // The chronological prompt + its inline 1/2/3 options, wrapped to the panel.
-        for line in wrap_text(inter.prompt, inner_w as usize) {
-            if deck_y >= y0 + h.saturating_sub(2) {
+        let bottom = y0 + h.saturating_sub(2);
+        // The chronological prompt reads as a block; the 1/2/3 options then sit on their
+        // own lines beneath it, separated by a blank row, so they never crowd the question.
+        let (question, options) = split_prompt(inter.prompt);
+        for line in wrap_text(question, inner_w as usize) {
+            if deck_y >= bottom {
                 break;
             }
             buf_set_str(buf, inner_x, deck_y, &line, Style::default().fg(SECTION_FG).bg(WS_BG));
             deck_y += 1;
+        }
+        // Blank line separating the question block from the choices.
+        deck_y += 1;
+        for opt in options {
+            for line in wrap_text(opt, inner_w as usize) {
+                if deck_y >= bottom {
+                    break;
+                }
+                buf_set_str(buf, inner_x, deck_y, &line, Style::default().fg(TEXT_FG).bg(WS_BG));
+                deck_y += 1;
+            }
         }
         deck_y += 1;
     }
@@ -905,8 +941,8 @@ fn interrogation_penalty(core: &mut TuringCore, state: &mut GlobalStateContext, 
 // TICK — the Imitation Game cadence
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Per-frame update: drive the 20-second split-interrogation cadence and time out an
-/// unanswered phase into a penalty.
+/// Per-frame update: drive the split-interrogation cadence (a short between-question beat,
+/// then the timed answer window) and time out an unanswered phase into a penalty.
 pub fn tick_turing(
     core: &mut TuringCore,
     state: &mut GlobalStateContext,
@@ -969,6 +1005,21 @@ mod tests {
             .collect();
         for (pos, target) in targets {
             core.infinite_tape[pos] = target;
+        }
+    }
+
+    #[test]
+    fn split_prompt_separates_question_from_stacked_options() {
+        // Every authored prompt splits into a question and exactly three options, so the
+        // renderer can stack 1/2/3 on their own lines beneath the question block.
+        for def in INTERROGATIONS.iter() {
+            let (question, options) = split_prompt(def.prompt);
+            assert!(!question.is_empty() && !question.contains('\u{2014}'), "clean question");
+            assert!(!question.contains('|'), "options must not leak into the question");
+            assert_eq!(options.len(), 3, "three stacked options");
+            assert!(options[0].starts_with("1:"));
+            assert!(options[1].starts_with("2:"));
+            assert!(options[2].starts_with("3:"));
         }
     }
 

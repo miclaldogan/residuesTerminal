@@ -100,6 +100,9 @@ pub struct GlobalStateContext {
 /// Engine tick cadence — the main loop ticks every 16ms (~62.5 fps); we use 62 so a
 /// "second" of progressive decay is measured deterministically against `act_elapsed_ticks`.
 const TICKS_PER_SEC: u64 = 62;
+/// Full candle height in internal wax rows (the desk renderer maps this onto the visible
+/// sub-cell wax shaft). The starting value for Act I and the divisor for every per-act cap.
+pub const CANDLE_MAX_ROWS: u16 = 120;
 
 impl GlobalStateContext {
     pub fn new() -> Self {
@@ -112,7 +115,7 @@ impl GlobalStateContext {
             stilboestrol_ppm: 0.0,
             vision_blur_factor: 0.0,
             apple_bites_taken: 0,
-            candle_rows_remaining: 120, // Başlangıç mum dikey çözünürlüğü (satır sayısı)
+            candle_rows_remaining: CANDLE_MAX_ROWS, // Başlangıç mum dikey çözünürlüğü (satır sayısı)
             chemical_drift_seed: 42,
             lookup_active: false,
             monologue_timer: 0,
@@ -169,6 +172,21 @@ impl GlobalStateContext {
         }
     }
 
+    /// The candle's per-chapter starting height in wax rows (out of [`CANDLE_MAX_ROWS`]).
+    /// The life-line gutters one notch per act — a full candle in Act I down to a ~5%
+    /// critical stub by the Turing endgame. Set on every act entry, so the across-act
+    /// decline is deterministic; the within-act time/fault melt then drains from there.
+    pub fn candle_cap_rows(act: Act) -> u16 {
+        match act {
+            Act::Jacquard1804 => CANDLE_MAX_ROWS,           // 100%
+            Act::Babbage1837 => CANDLE_MAX_ROWS * 80 / 100, // 80%
+            Act::Lovelace1843 => CANDLE_MAX_ROWS * 60 / 100, // 60%
+            Act::Boole1854 => CANDLE_MAX_ROWS * 40 / 100,   // 40%
+            Act::Shannon1937 => CANDLE_MAX_ROWS * 20 / 100, // 20%
+            Act::Turing1936_1950 => CANDLE_MAX_ROWS * 5 / 100, // 5% — critical flicker
+        }
+    }
+
     /// Zaman döngüsü veya hatalı derlemelerde mumu eriten fonksiyon
     pub fn melt_candle(&mut self, rows: u16) {
         let multiplier = if self.apple_bites_taken > 0 { 1.5 } else { 1.0 };
@@ -185,6 +203,10 @@ impl GlobalStateContext {
         if self.current_act != self.timer_prev_act {
             self.timer_prev_act = self.current_act;
             self.act_elapsed_ticks = 0;
+            // Step the candle to this chapter's life-line ceiling on entry, so it visibly
+            // gutters down across the six acts (full → ~5% critical by Act VI). The
+            // within-act time/fault melt below then drains it further from this start.
+            self.candle_rows_remaining = Self::candle_cap_rows(self.current_act);
         } else {
             self.act_elapsed_ticks = self.act_elapsed_ticks.saturating_add(1);
         }
@@ -197,15 +219,18 @@ impl GlobalStateContext {
             self.base_heartbeat_bpm -= 1;
         }
 
-        // Zamanla mumun erimesi (Stilboestrol ppm seviyesine göre hızlanır)
+        // Zamanla mumun erimesi (Stilboestrol ppm seviyesine göre hızlanır). One internal
+        // wax row burns every `interval` frames; the wax shaft is ~120 rows mapped onto a
+        // dozen visible cells, so these rates are tuned to read as a clearly-shortening
+        // candle over tens of seconds (and to accelerate sharply under chemical load).
         let interval = if self.stilboestrol_ppm > 80.0 {
-            200
+            45
         } else if self.stilboestrol_ppm > 50.0 {
-            500
+            90
         } else if self.stilboestrol_ppm > 30.0 {
-            1000
+            160
         } else {
-            3000
+            240
         };
 
         if self.frame_counter % interval == 0 {

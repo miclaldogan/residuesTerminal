@@ -184,6 +184,7 @@ pub struct AudioEngine {
     score_is_turing: bool,      // which score track is currently looping
     whisper: Option<Child>,     // the current "Memory Echo" whisper (single, replaceable)
     whisper_pan_latch: f32,     // alternating L/R latch flipped on each whisper
+    whispers_suppressed: bool,  // hard mute for whispers on intro/outro/prelude/menu screens
     prep: HashMap<&'static str, String>, // pre-trimmed WAVs for low-latency paplay
     base: PathBuf,              // resolved `audio/` directory (CWD-independent)
     muted: bool,                // master mute, toggled from the main menu
@@ -328,6 +329,7 @@ impl AudioEngine {
             score_is_turing: false,
             whisper: None,
             whisper_pan_latch: PAN_LEFT,
+            whispers_suppressed: false,
             prep,
             base,
             muted: false,
@@ -538,12 +540,32 @@ impl AudioEngine {
         pan
     }
 
-    /// Fire one "Memory Echo" whisper at low background level, hard-panned to `pan`. Only
-    /// one whisper sounds at a time — the previous is reaped first, so echoes never pile
-    /// up and a missing asset is a clean no-op (the player just exits immediately).
+    /// Suppress (or re-enable) ONLY the ambient Memory-Echo whisper channel. This gates
+    /// nothing else: the scripted voice-over, the score, the rain/ambient bed and the
+    /// heartbeat all keep playing while it is set. The main loop enables it off the lived
+    /// puzzle screen so whispers never bleed over a monologue. Suppressing also instantly
+    /// cuts any whisper already playing.
+    pub fn set_whispers_suppressed(&mut self, suppressed: bool) {
+        if suppressed && !self.whispers_suppressed {
+            Self::reap(&mut self.whisper);
+        }
+        self.whispers_suppressed = suppressed;
+    }
+
+    /// Fire one "Memory Echo" whisper at low background level, hard-panned to `pan`.
+    ///
+    /// Single-whisper guard: if a whisper is still sounding, the new request is **dropped**
+    /// entirely — echoes never stack or interrupt one another. Suppressed states (intros,
+    /// outros, prelude) drop it too. A missing asset is a clean no-op.
     pub fn play_whisper(&mut self, rel: &str, pan: f32) {
-        if self.muted {
+        if self.muted || self.whispers_suppressed {
             return;
+        }
+        // Drop the request if one is still playing; otherwise clean up the finished handle.
+        if let Some(c) = self.whisper.as_mut() {
+            if matches!(c.try_wait(), Ok(None)) {
+                return; // still sounding → never stack on top of it
+            }
         }
         Self::reap(&mut self.whisper);
         self.whisper = self.spawn_panned(rel, false, WHISPER_VOLUME, Some(pan), false);

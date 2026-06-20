@@ -38,6 +38,13 @@ const LINE_GAP: u16 = 40;
 /// the finished screen land for a beat instead of slamming straight into the dialogue.
 const CINEMATIC_PREROLL: u64 = 50;
 
+/// The bitten-apple (Act VI) outro flows on its own rather than waiting on ENTER: it uses a
+/// shorter pre-roll than the other cinematics, types at the accelerated cadence, and after
+/// each line finishes holds a brief beat before auto-advancing — the last line auto-breaks
+/// into the finale. (ENTER still works as an optional skip.)
+const OUTRO_PREROLL: u64 = 14;    // ~0.22 s black hold before the first line
+const OUTRO_AUTO_HOLD: u16 = 34;  // ~0.55 s beat after a line finishes, before advancing
+
 /// The voice-over that plays the instant an act is taken up. Returns the speaker,
 /// the line, and the deterministic sound cue. Never leaks numeric solutions.
 fn act_intro(act: Act) -> (Speaker, &'static str, VoiceCue) {
@@ -92,21 +99,30 @@ fn start_cinematic_line(
     } else {
         (cinematic::intro(act_id).lines[line_index], VoiceCue::ActIntroLine(act, take))
     };
-    let frames = audio.duration_frames(cue.marker());
-    dialogue.play_timed(Speaker::System, line, Some(cue), frames);
+    // The bitten-apple (Act VI) outro is self-playing and reads on pure black with no VO, so
+    // it types at the accelerated cadence (~2x). Every other cinematic line stays synced to
+    // its voice take's measured length.
+    if is_outro && act_id >= 6 {
+        dialogue.play_fast(Speaker::System, line, Some(cue));
+    } else {
+        let frames = audio.duration_frames(cue.marker());
+        dialogue.play_timed(Speaker::System, line, Some(cue), frames);
+    }
 }
 
 /// The whisper-asset prefix for the acts whose Memory Echoes fire on each narrative line
-/// (`whispers/<prefix>_<left|right>.mp3`). Boole and Turing return `None` — they drive
-/// their own context-specific whispers (Boole's binary TRUE/FALSE lock, Turing's
-/// chronological milestone takes), so they are not double-fired here.
+/// (`whispers/<prefix>_<left|right>.mp3`). Boole now fires on narrative beats like the
+/// other acts (its whisper was decoupled from the Space/gate-cycle input, which used to
+/// spam it). Only Turing returns `None` — it drives its own chronological milestone takes
+/// from `tick_turing`, so it is not double-fired here.
 fn act_whisper_prefix(act: Act) -> Option<&'static str> {
     match act {
         Act::Jacquard1804 => Some("jacquard"),
         Act::Babbage1837 => Some("babbage"),
         Act::Lovelace1843 => Some("lovelace"),
+        Act::Boole1854 => Some("boole"),
         Act::Shannon1937 => Some("shannon"),
-        Act::Boole1854 | Act::Turing1936_1950 => None,
+        Act::Turing1936_1950 => None,
     }
 }
 
@@ -427,6 +443,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut turing_score_active = false;
     // Frames elapsed in the FinalCredits state — drives the closing typewriter roll.
     let mut credits_elapsed: u64 = 0;
+    // Countdown for the self-playing Act VI outro: frames to hold after a line finishes
+    // typing before auto-advancing to the next line / the finale.
+    let mut outro_auto_hold: u16 = 0;
     // Rotates the 3 numbered whisper takes per side for the line-driven Memory Echoes.
     let mut whisper_seq: u64 = 0;
     let mut prev_snapped = false;
@@ -824,11 +843,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Heartbeat metronome — fire beats at the live BPM. A `0` BPM is the
             // arrhythmia skip window, where no beat fires (the silence is the skip).
             let bpm = state.current_bpm as f32;
-            // The pulse runs only inside the lived simulation — the menu and the
-            // cinematic intros/outros are still, calm antechambers.
+            // The pulse runs through the whole lived experience, including the cinematic
+            // intros/outros (only the ghost-whisper layer is hushed on those screens). The
+            // dormant main menu stays silent, and the final credits cut the beat at the halt
+            // (stop_heartbeat + FinalCredits is excluded here), so it is never re-armed there.
             let pulse_active = matches!(
                 state.screen_state,
-                ScreenState::NarrativePrelude | ScreenState::AmbientDesk | ScreenState::ActivePuzzle
+                ScreenState::NarrativePrelude
+                    | ScreenState::AmbientDesk
+                    | ScreenState::ActivePuzzle
+                    | ScreenState::ActIntro { .. }
+                    | ScreenState::ActOutro { .. }
             );
             if pulse_active && bpm > 0.5 {
                 heartbeat_accum += bpm / 3750.0; // beats per 16ms tick (62.5 fps × 60s)
@@ -846,15 +871,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 audio.daktilo_strike();
             }
 
-            // ── Memory Echoes. Skipping a line instantly cuts the running whisper (the
-            //    pacing guard); each fresh narrative line fires a new low whisper that
-            //    hops ears via the alternating pan latch. Turing milestones are fired
-            //    precisely from tick_turing (chronological index) and Boole's binary
-            //    TRUE/FALSE lock from its own handler — so they return `None` here. ──
+            // ── Memory Echoes. Narrow gate: ONLY the ghost-whisper channel is suppressed
+            //    off the lived puzzle screen — `set_whispers_suppressed` gates nothing but
+            //    `play_whisper` (and cuts any running echo). The scripted voice-over, the
+            //    score, the rain/ambient bed and the heartbeat all keep playing normally on
+            //    the intro/outro/prelude screens; only the binaural whispers are silenced,
+            //    so they can't bleed over a monologue (e.g. the opening Turing prelude). ──
+            let whispers_ok = matches!(state.screen_state, ScreenState::ActivePuzzle);
+            audio.set_whispers_suppressed(!whispers_ok);
+            // Skipping a line instantly cuts the running whisper (the pacing guard); each
+            // fresh narrative line fires one new low whisper that hops ears via the pan
+            // latch. The single-whisper guard in `play_whisper` drops any request that
+            // would stack on top of one still sounding. Turing milestones fire from
+            // tick_turing (chronological index), so Turing returns `None` here.
             if dialogue.took_skip() {
                 audio.stop_whisper();
             }
-            if dialogue.took_line_start() {
+            if whispers_ok && dialogue.took_line_start() {
                 if let Some(prefix) = act_whisper_prefix(state.current_act) {
                     let pan = audio.next_whisper_pan();
                     let side = if pan < 0.0 { "left" } else { "right" };
@@ -904,8 +937,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ScreenState::ActOutro { act_id, text_index, timer } => {
                     let nt = timer.wrapping_add(1);
                     state.screen_state = ScreenState::ActOutro { act_id, text_index, timer: nt };
-                    if text_index == 0 && nt == CINEMATIC_PREROLL && !dialogue.is_active() {
+                    // The bitten-apple (Act VI) outro uses a shorter breathing-room hold;
+                    // every other outro keeps the standard pre-roll and ENTER paging.
+                    let preroll = if act_id >= 6 { OUTRO_PREROLL } else { CINEMATIC_PREROLL };
+                    if text_index == 0 && nt == preroll && !dialogue.is_active() {
                         start_cinematic_line(&mut dialogue, &audio, act_id, true, 0);
+                        outro_auto_hold = OUTRO_AUTO_HOLD;
+                    } else if act_id >= 6 && dialogue.is_active() {
+                        // Self-playing finale outro: each line types fast, holds a short beat,
+                        // then auto-advances; the last line auto-breaks into the binary
+                        // waterfall. ENTER remains an optional skip (handled in the input arm).
+                        if dialogue.is_typing() {
+                            outro_auto_hold = OUTRO_AUTO_HOLD; // keep resetting while it types
+                        } else if outro_auto_hold > 0 {
+                            outro_auto_hold -= 1;
+                        } else {
+                            let lines = cinematic::outro(act_id).lines;
+                            if text_index + 1 < lines.len() {
+                                let ni = text_index + 1;
+                                state.screen_state = ScreenState::ActOutro { act_id, text_index: ni, timer: nt };
+                                start_cinematic_line(&mut dialogue, &audio, act_id, true, ni);
+                                outro_auto_hold = OUTRO_AUTO_HOLD;
+                            } else {
+                                audio.stop_heartbeat();
+                                state.screen_state = ScreenState::FinalCredits;
+                                credits_elapsed = 0;
+                            }
+                        }
                     }
                 }
                 // The credits roll forward each tick — the typewriter consumes this clock.
@@ -1020,13 +1078,15 @@ mod render_tests {
 
     #[test]
     fn whisper_prefixes_cover_the_line_driven_acts_only() {
-        // Boole and Turing fire their own context-specific whispers, so they opt out of
-        // the generic per-line trigger; the rest map to a whisper-asset prefix.
+        // Every act except Turing fires line-driven Memory-Echo whispers. Boole now joins
+        // the generic per-line trigger (its whisper was decoupled from the Space/gate-cycle
+        // input that used to spam it). Only Turing opts out — it fires its own chronological
+        // milestone takes from tick_turing.
         assert_eq!(act_whisper_prefix(Act::Jacquard1804), Some("jacquard"));
         assert_eq!(act_whisper_prefix(Act::Babbage1837), Some("babbage"));
         assert_eq!(act_whisper_prefix(Act::Lovelace1843), Some("lovelace"));
+        assert_eq!(act_whisper_prefix(Act::Boole1854), Some("boole"));
         assert_eq!(act_whisper_prefix(Act::Shannon1937), Some("shannon"));
-        assert_eq!(act_whisper_prefix(Act::Boole1854), None);
         assert_eq!(act_whisper_prefix(Act::Turing1936_1950), None);
     }
 }
