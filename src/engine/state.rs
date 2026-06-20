@@ -81,6 +81,14 @@ pub struct GlobalStateContext {
     pub base_heartbeat_bpm: u32,     // Derinden gelen boğuk kalp atışının baz hızı
     pub arrhythmia_multiplier: f32,  // Faz 2/3'te kalp ritmine eklenecek düzensizlik sapması
 
+    // ── Live vitals + Act VI decay, recomputed each tick and read by the renderers ──
+    /// The displayed heartbeat BPM and the heart-icon pulse rate (single source of truth
+    /// for the VITAL readout and the heartbeat metronome).
+    pub current_bpm: u32,
+    /// Act VI per-character log-corruption probability (0 elsewhere); rises with Turing's
+    /// stabilised-residue progress and his panic spikes.
+    pub turing_glitch_chance: f32,
+
     // Render Döngüsü Sayacı
     pub frame_counter: u64,          // Alev titreşimi ve animasyon fazı hesaplaması için kare sayacı
 
@@ -110,6 +118,8 @@ impl GlobalStateContext {
             monologue_timer: 0,
             base_heartbeat_bpm: 72,
             arrhythmia_multiplier: 0.0,
+            current_bpm: 72,
+            turing_glitch_chance: 0.0,
             frame_counter: 0,
             act_elapsed_ticks: 0,
             timer_prev_act: Act::Jacquard1804,

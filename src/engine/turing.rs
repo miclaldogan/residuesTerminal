@@ -108,6 +108,9 @@ pub struct TuringCore {
     interro_timer: u16,
     status_log: Vec<(String, LogKind)>,
     pub solved: bool,
+    /// True while the heart is spiked from a failed interrogation — drives the +panic BPM
+    /// modifier and the extra log corruption. Cleared when the pulse is steadied.
+    pub heart_spiked: bool,
 }
 
 impl TuringCore {
@@ -146,7 +149,15 @@ impl TuringCore {
                 ("Stabilise the act residues (hex keys), then ENTER to run to HALT.".to_string(), LogKind::Info),
             ],
             solved: false,
+            heart_spiked: false,
         }
+    }
+
+    /// The player's progression counter — the number of act residues already stabilised
+    /// (0..5). Drives the active interrogation milestone, the heartbeat formula, and the
+    /// progressive log decay.
+    pub fn stable_residues_count(&self) -> usize {
+        self.stabilised_count()
     }
 
     fn push_log(&mut self, msg: String, kind: LogKind) {
@@ -466,7 +477,13 @@ fn state_name(s: State) -> &'static str {
 /// Render the centre workspace: the horizontally-scrolling Turing tape bracketed in
 /// heavy borders with a pulsating head, plus the System Deck dossier beneath it. The
 /// left Mind Stream is the standard mind-log panel; the right archive is the desk.
-pub fn render_workspace(f: &mut Frame, area: Rect, state: &mut GlobalStateContext, core: &TuringCore) {
+pub fn render_workspace(
+    f: &mut Frame,
+    area: Rect,
+    state: &mut GlobalStateContext,
+    core: &TuringCore,
+    narration_streaming: bool,
+) {
     let buf = f.buffer_mut();
     layout::draw_workspace_grid(buf, area, WS_BG);
 
@@ -515,9 +532,11 @@ pub fn render_workspace(f: &mut Frame, area: Rect, state: &mut GlobalStateContex
     let ctrl_col = if core.current_state == State::Halt { OK_FG } else { TEXT_FG };
     buf_set_str(buf, inner_x, ctrl_y, &clip(&ctrl, inner_w as usize), Style::default().fg(ctrl_col).bg(WS_BG));
 
-    // ── Active interrogation prompt (the Imitation Game intrusion). ──
+    // ── Active interrogation prompt (the Imitation Game intrusion). The choices stay
+    //    sealed while the milestone narrative is still streaming in the left panel —
+    //    they materialise only once the line has finished (or been skipped). ──
     let mut deck_y = ctrl_y + 2;
-    if let Some(inter) = &core.interrogation {
+    if let Some(inter) = core.interrogation.as_ref().filter(|_| !narration_streaming) {
         let secs = (inter.timer / 62).saturating_add(1);
         buf_set_str(
             buf,
@@ -739,6 +758,16 @@ pub fn handle_input(
         return;
     }
 
+    // ── Streaming skip-interrupt (and the narrative gate). While the milestone log is
+    //    still typing out in the left panel, ANY keypress flushes the whole remaining
+    //    line at once and is consumed — so the centre choices stay sealed and 1/2/3 are
+    //    never processed until the narrative has finished (or is skipped). The options
+    //    unlock the exact frame `is_streaming()` drops to false. ──
+    if dialogue.is_streaming() {
+        dialogue.skip();
+        return;
+    }
+
     // The Imitation Game intercepts numeric input while a phase is live.
     if core.interrogation.is_some() {
         if let KeyCode::Char(c @ '1'..='3') = key.code {
@@ -818,6 +847,7 @@ fn answer_interrogation(
         // Steady the pulse and stabilise the next act residue — isolating a true memory
         // mutates the tape and advances RESIDUES: N/5 stable.
         state.arrhythmia_multiplier = 0.0;
+        core.heart_spiked = false;
         audio.menu_confirm();
         if core.stabilize_next() {
             let n = core.stabilised_count();
@@ -848,6 +878,7 @@ fn trigger_victory(core: &mut TuringCore, state: &mut GlobalStateContext, dialog
         return;
     }
     core.solved = true;
+    core.heart_spiked = false;
     core.push_log("HALT reached on a stabilised tape. The computation resolves.".to_string(), LogKind::Success);
     if !state.acts_completed.contains(&Act::Turing1936_1950) {
         state.acts_completed.push(Act::Turing1936_1950);
@@ -865,6 +896,7 @@ fn trigger_victory(core: &mut TuringCore, state: &mut GlobalStateContext, dialog
 fn interrogation_penalty(core: &mut TuringCore, state: &mut GlobalStateContext, audio: &mut AudioEngine) {
     state.base_heartbeat_bpm = state.base_heartbeat_bpm.max(140);
     state.arrhythmia_multiplier = 2.0;
+    core.heart_spiked = true;
     state.melt_candle(15);
     audio.glitch();
     core.push_log("[IMITATION] failed to isolate the memory \u{2014} the heart spikes to 140+.".to_string(), LogKind::Error);
@@ -915,7 +947,8 @@ pub fn tick_turing(
     });
     core.push_log("[IMITATION] split interrogation \u{2014} isolate the true memory (1/2/3).".to_string(), LogKind::Warning);
     if !dialogue.is_typing() {
-        dialogue.play(Speaker::System, def.log, Some(VoiceCue::PoliceBootstep));
+        // Accelerated Act VI cadence so the choices unlock without dead air.
+        dialogue.play_fast(Speaker::System, def.log, Some(VoiceCue::PoliceBootstep));
     }
 }
 
@@ -956,6 +989,16 @@ mod tests {
         for line in wrap_text(INTERROGATIONS[2].prompt, 28) {
             assert!(line.chars().count() <= 28);
         }
+    }
+
+    #[test]
+    fn heart_spike_and_progression_counter_start_calm() {
+        let core = TuringCore::new();
+        assert!(!core.heart_spiked);
+        assert_eq!(core.stable_residues_count(), 0);
+        // The vitals formula the main loop applies: 75 + count*15 (+55 when spiked).
+        let calm = 75 + core.stable_residues_count() as u32 * 15;
+        assert_eq!(calm, 75);
     }
 
     #[test]
@@ -1038,7 +1081,7 @@ mod tests {
         let (w, h) = (30u16, 18u16);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| {
-            render_workspace(f, Rect::new(0, 0, w, h), &mut state, &core);
+            render_workspace(f, Rect::new(0, 0, w, h), &mut state, &core, false);
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
@@ -1059,4 +1102,3 @@ mod tests {
         assert!(core.head_position <= core.infinite_tape.len());
     }
 }
-

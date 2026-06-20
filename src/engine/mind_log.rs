@@ -39,6 +39,30 @@ fn corrupt_string(s: &str, ppm: f32, seed: u64) -> String {
     }).collect()
 }
 
+/// Act VI cognitive-breakdown filter: as Turing's progression advances and his heart
+/// spikes, completed log glyphs decay into structural entropy tokens (`§ # * ? ░`) with
+/// probability `chance`. Deterministic in `seed` so the decay shimmers per frame rather
+/// than dancing wildly; spaces are preserved so the word shapes survive the corruption.
+fn turing_corrupt(s: &str, chance: f32, seed: u64) -> String {
+    if chance <= 0.0 {
+        return s.to_string();
+    }
+    const TOKENS: [char; 5] = ['\u{00A7}', '#', '*', '?', '\u{2591}']; // § # * ? ░
+    let mut rng = Lcg::new(seed);
+    s.chars()
+        .map(|c| {
+            if c == ' ' {
+                return ' ';
+            }
+            if (rng.next() % 1000) as f32 / 1000.0 < chance {
+                TOKENS[(rng.next() as usize) % TOKENS.len()]
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Mechanical gear-alignment text error: swap `level` adjacent character pairs inside
 /// a string (e.g. "this is" → "tihs si"). Spaces are skipped so word boundaries hold
 /// and the line stays a recognisable-but-misaligned echo of itself. Deterministic in
@@ -481,6 +505,20 @@ impl DialogueEngine {
         self.active && !self.done
     }
 
+    /// Alias of [`Self::is_typing`] — true while the current line is still streaming
+    /// character-by-character onto the panel (read by the Act VI narrative gate).
+    pub fn is_streaming(&self) -> bool {
+        self.is_typing()
+    }
+
+    /// Stream a plain string at an accelerated cadence (Act VI): the per-character frame
+    /// delay is halved, so the milestone log snaps onto the panel twice as fast.
+    pub fn play_fast(&mut self, speaker: Speaker, text: &str, cue: Option<VoiceCue>) {
+        let atoms = text.chars().map(Atom::Put).collect();
+        self.start(speaker, atoms, cue, None);
+        self.scale = 0.5; // 50% frame-delay reduction (overrides the default 1.0)
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -663,6 +701,11 @@ pub fn render_mind_log(
                     .wrapping_add(glitch_level as u64);
                 shown = gear_glitch(&shown, glitch_level, gseed);
             }
+            // Act VI cognitive decay — the older logs break down as his condition worsens.
+            if state.current_act == Act::Turing1936_1950 && state.turing_glitch_chance > 0.0 {
+                let tseed = seed_ctr.wrapping_add(state.frame_counter / 8);
+                shown = turing_corrupt(&shown, state.turing_glitch_chance, tseed);
+            }
             glitch_ord += 1;
             stream.push((base, shown));
         }
@@ -809,6 +852,30 @@ mod glitch_tests {
     #[test]
     fn gear_glitch_level_zero_is_identity() {
         assert_eq!(gear_glitch("this is", 0, 1), "this is");
+    }
+
+    #[test]
+    fn turing_corrupt_decays_glyphs_but_keeps_spaces_and_length() {
+        let s = "LOAD the tape";
+        assert_eq!(turing_corrupt(s, 0.0, 1), s); // zero chance is identity
+        let out = turing_corrupt(s, 1.0, 7); // full corruption
+        assert_eq!(out.chars().count(), s.chars().count(), "length preserved");
+        for (a, b) in s.chars().zip(out.chars()) {
+            if a == ' ' {
+                assert_eq!(b, ' ', "spaces preserved");
+            }
+        }
+        assert_ne!(out, s, "something decayed");
+    }
+
+    #[test]
+    fn play_fast_streams_then_flushes_on_skip() {
+        let mut d = DialogueEngine::new();
+        d.play_fast(Speaker::System, "the tape remembers", None);
+        assert!(d.is_streaming());
+        d.skip(); // the Act VI skip-interrupt
+        assert!(!d.is_streaming());
+        assert_eq!(d.visible(), "the tape remembers");
     }
 
     #[test]

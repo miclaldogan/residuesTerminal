@@ -191,12 +191,12 @@ fn put_seg(
     x
 }
 
-/// The live heartbeat rate in BPM — the single source of truth shared by the on-screen
-/// `VITAL: ♡ {bpm}` readout and the audio heartbeat metronome, so the audible pulse and
-/// the displayed number can never drift apart. A return of `0.0` is a *skipped beat*
-/// (the arrhythmia drop window): the telemetry shows `--` and the audio stays silent.
-/// Rising chemical dosage (PPM) elevates the rate; arrhythmia injects spikes and drops.
-fn current_bpm(state: &GlobalStateContext) -> f32 {
+/// The textured heartbeat rate in BPM for the non-Turing acts: rising chemical dosage
+/// elevates it, and arrhythmia injects per-frame spikes and skipped beats (a `0.0`
+/// return is a skip — the telemetry shows `--` and the audio stays silent). The result
+/// is folded into `state.current_bpm` each tick. Act VI overrides this with its own
+/// progression-driven formula.
+fn textured_bpm(state: &GlobalStateContext) -> f32 {
     let mut bpm = state.base_heartbeat_bpm as f32;
     bpm += ((state.frame_counter as f64 * 0.1).sin() * 2.0) as f32;
     // Deeper into the chemical dosage, the heart drives harder.
@@ -255,8 +255,19 @@ fn render_telemetry_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, sta
         }
     }
 
-    // Heartbeat — single shared source of truth, also drives the audio metronome.
-    let bpm = current_bpm(&state);
+    // Heartbeat — the live BPM is recomputed each tick into `state.current_bpm` (the
+    // single source of truth shared with the audio metronome). The ♡ icon pulses in
+    // lockstep with the beat interval, so it visibly races as the BPM climbs.
+    let bpm = state.current_bpm;
+    let beat_frames = if bpm > 0 { (3750 / bpm).max(2) as u64 } else { 0 };
+    let pulse_on = beat_frames > 0 && (state.frame_counter % beat_frames) < (beat_frames / 2).max(1);
+    let (heart_glyph, heart_col) = if bpm == 0 {
+        ("\u{2661} ", heart) // skipped beat — empty
+    } else if pulse_on {
+        ("\u{2665} ", Color::Rgb(255, 110, 70)) // ♥ filled + bright on the beat
+    } else {
+        ("\u{2661} ", heart) // ♡ empty between beats
+    };
 
     let (status, thread) = match state.current_act {
         Act::Jacquard1804 => ("Jacquard Loom Active", "0x01"),
@@ -275,13 +286,14 @@ fn render_telemetry_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, sta
         x = put_seg(buf, max_x, x, y, status, bright, bg);
         x = put_seg(buf, max_x, x, y, "   │   ", dim, bg);
         x = put_seg(buf, max_x, x, y, "VITAL: ", label, bg);
-        x = put_seg(buf, max_x, x, y, "\u{2661} ", heart, bg);
-        if bpm <= 0.5 {
+        x = put_seg(buf, max_x, x, y, heart_glyph, heart_col, bg);
+        if bpm == 0 {
             x = put_seg(buf, max_x, x, y, "-- BPM", heart, bg);
             x = put_seg(buf, max_x, x, y, " \u{00B7} SKIPPED", label, bg);
         } else {
-            x = put_seg(buf, max_x, x, y, &format!("{:.0} BPM", bpm), heart, bg);
-            x = put_seg(buf, max_x, x, y, " \u{00B7} METRONOME", label, bg);
+            x = put_seg(buf, max_x, x, y, &format!("{} BPM", bpm), heart, bg);
+            let beat_label = if state.arrhythmia_multiplier > 0.0 { " \u{00B7} ARRHYTHMIC" } else { " \u{00B7} METRONOME" };
+            x = put_seg(buf, max_x, x, y, beat_label, label, bg);
         }
         x = put_seg(buf, max_x, x, y, "   │   ", dim, bg);
         x = put_seg(buf, max_x, x, y, "THREAD: ", label, bg);
@@ -413,7 +425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Act::Lovelace1843 => lovelace::render_lovelace(f, layout.workspace_rect, &mut state, &lovelace_puzzle),
                         Act::Boole1854 => boole::render_boole(f, layout.workspace_rect, &mut state, &boole_puzzle),
                         Act::Shannon1937 => shannon::render_shannon(f, layout.workspace_rect, &mut state, &shannon_puzzle),
-                        Act::Turing1936_1950 => turing::render_workspace(f, layout.workspace_rect, &mut state, &turing_core),
+                        Act::Turing1936_1950 => turing::render_workspace(f, layout.workspace_rect, &mut state, &turing_core, dialogue.is_streaming()),
                     }
                     render_desk(f, layout.desk_rect, &state);
                 }
@@ -719,9 +731,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             audio.set_act_music(turing_score_active);
 
-            // Heartbeat metronome — fire beats at the live BPM. A `0.0` BPM is the
+            // ── Live vitals, recomputed each tick. Act VI is state-driven by the
+            //    progression formula (climbing organically as RESIDUES approach 5/5, +55
+            //    while the heart is spiked); every other act keeps the textured chemical/
+            //    arrhythmia curve. `state.current_bpm` is the single source the VITAL
+            //    readout, the ♡ pulse, and the audio metronome all read. ──
+            if state.current_act == Act::Turing1936_1950 {
+                let base = 75 + turing_core.stable_residues_count() as u32 * 15;
+                let panic = if turing_core.heart_spiked { 55 } else { 0 };
+                state.current_bpm = (base + panic).min(220);
+                // Progressive cognitive decay of the older log rows.
+                state.turing_glitch_chance = (turing_core.stable_residues_count() as f32 * 0.12
+                    + if turing_core.heart_spiked { 0.25 } else { 0.0 })
+                    .min(0.85);
+            } else {
+                state.current_bpm = textured_bpm(&state).max(0.0) as u32;
+                state.turing_glitch_chance = 0.0;
+            }
+
+            // Heartbeat metronome — fire beats at the live BPM. A `0` BPM is the
             // arrhythmia skip window, where no beat fires (the silence is the skip).
-            let bpm = current_bpm(&state);
+            let bpm = state.current_bpm as f32;
             // The pulse runs only inside the lived simulation — the menu and the
             // cinematic intros/outros are still, calm antechambers.
             let pulse_active = matches!(
