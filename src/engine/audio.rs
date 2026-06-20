@@ -35,9 +35,9 @@ fn resolve_audio_base() -> PathBuf {
 /// were inaudible under the clacks — these now sit as a present-but-background layer.
 const AMBIENT_TRACKS: &[(&str, u8)] = &[
     ("ambient/rain_wilmslow_loop.mp3", 55),
-    ("ambient/backgroundMusic.mp3", 52),
-    ("sfx/bump.mp3", 62),
-    ("ambient/clock_pendulum_loop.mp3", 38),
+    ("ambient/backgroundMusic.mp3", 62),
+    ("sfx/bump.mp3", 72),
+    ("ambient/clock_pendulum_loop.mp3", 45),
 ];
 /// Short, single typewriter clack — one strike per committed character.
 const SFX_KEY: &str = "sfx/daktiloOne.mp3";
